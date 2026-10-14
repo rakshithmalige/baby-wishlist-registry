@@ -8,7 +8,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { Registry, FileBackend, SupabaseBackend, newItem } = require('../src/store');
 
-const SECRET = 'service-role-test-secret';
+const ANON = 'anon-test-key';
+const SECRET = 'registry-test-secret';
 
 let tmpDir;
 
@@ -31,8 +32,13 @@ function fakePostgrest() {
   };
 
   const server = http.createServer(async (req, res) => {
-    if (req.headers.apikey !== SECRET || req.headers.authorization !== `Bearer ${SECRET}`) {
+    if (req.headers.apikey !== ANON || req.headers.authorization !== `Bearer ${ANON}`) {
       return send(res, 401, { message: 'Invalid API key' });
+    }
+    // Like the row-level security policy: without the registry secret, the row is invisible.
+    if (req.headers['x-registry-key'] !== SECRET) {
+      if (req.method === 'GET') return send(res, 200, []);
+      return send(res, 401, { message: 'new row violates row-level security policy' });
     }
     const url = new URL(req.url, 'http://fake');
     const chunks = [];
@@ -120,13 +126,13 @@ test('Supabase backend: init creates the row once and keeps existing data', asyn
   const fake = fakePostgrest();
   await fake.start();
   try {
-    const registry = new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET }));
+    const registry = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
     await registry.init();
     await registry.update((state) => {
       state.items.push(newItem({ name: 'Kept', link: '', notes: '', quantity: 1 }));
     });
 
-    await new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET })).init();
+    await new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET })).init();
     const state = await registry.read();
     assert.deepEqual(state.items.map((item) => item.name), ['Kept']);
     assert.equal(fake.state.row.rev, 2);
@@ -139,12 +145,12 @@ test('Supabase backend: a save that loses the race is retried on fresh data', as
   const fake = fakePostgrest();
   await fake.start();
   try {
-    const registryA = new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET }));
+    const registryA = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
     await registryA.init();
-    const registryB = new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET }));
+    const registryB = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
 
     // Make server A's first read happen, then let server B save before A writes.
-    const racing = new SupabaseBackend({ url: fake.url(), key: SECRET });
+    const racing = new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET });
     const originalLoad = racing.load.bind(racing);
     let interfered = false;
     racing.load = async () => {
@@ -177,7 +183,7 @@ test('Supabase backend: a failing save reports the status, never the key', async
   const fake = fakePostgrest();
   await fake.start();
   try {
-    const registry = new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET }));
+    const registry = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
     await registry.init();
     fake.state.failPatches = 1;
 
@@ -188,6 +194,7 @@ test('Supabase backend: a failing save reports the status, never the key', async
       (err) => {
         assert.match(err.message, /Storage save failed \(500\)/);
         assert.equal(err.message.includes(SECRET), false);
+        assert.equal(err.message.includes(ANON), false);
         return true;
       },
     );
@@ -196,14 +203,31 @@ test('Supabase backend: a failing save reports the status, never the key', async
   }
 });
 
-test('Supabase backend: a wrong key is rejected without echoing it', async () => {
+test('Supabase backend: a wrong anon key is rejected without echoing it', async () => {
   const fake = fakePostgrest();
   await fake.start();
   try {
-    const registry = new Registry(new SupabaseBackend({ url: fake.url(), key: 'the-wrong-key' }));
+    const registry = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: 'the-wrong-anon-key', registrySecret: SECRET }));
     await assert.rejects(registry.read(), (err) => {
       assert.match(err.message, /Storage read failed \(401\)/);
-      assert.equal(err.message.includes('the-wrong-key'), false);
+      assert.equal(err.message.includes('the-wrong-anon-key'), false);
+      return true;
+    });
+  } finally {
+    await fake.close();
+  }
+});
+
+test('Supabase backend: a wrong registry secret looks like an empty table, and says what to check', async () => {
+  const fake = fakePostgrest();
+  await fake.start();
+  try {
+    const seed = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
+    await seed.init();
+    const registry = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: 'the-wrong-secret' }));
+    await assert.rejects(registry.read(), (err) => {
+      assert.match(err.message, /REGISTRY_SECRET/);
+      assert.equal(err.message.includes('the-wrong-secret'), false);
       return true;
     });
   } finally {
@@ -215,14 +239,15 @@ test('Supabase backend: a missing row points at the schema file', async () => {
   const fake = fakePostgrest();
   await fake.start();
   try {
-    const registry = new Registry(new SupabaseBackend({ url: fake.url(), key: SECRET }));
+    const registry = new Registry(new SupabaseBackend({ url: fake.url(), anonKey: ANON, registrySecret: SECRET }));
     await assert.rejects(registry.read(), /supabase\/schema\.sql/);
   } finally {
     await fake.close();
   }
 });
 
-test('Supabase backend needs both a URL and a key', () => {
-  assert.throws(() => new SupabaseBackend({ url: 'https://example.supabase.co', key: '' }), /must both be set/);
-  assert.throws(() => new SupabaseBackend({ url: '', key: SECRET }), /must both be set/);
+test('Supabase backend needs a URL, the anon key and the registry secret', () => {
+  assert.throws(() => new SupabaseBackend({ url: 'https://example.supabase.co', anonKey: ANON, registrySecret: '' }), /must all be set/);
+  assert.throws(() => new SupabaseBackend({ url: 'https://example.supabase.co', anonKey: '', registrySecret: SECRET }), /must all be set/);
+  assert.throws(() => new SupabaseBackend({ url: '', anonKey: ANON, registrySecret: SECRET }), /must all be set/);
 });

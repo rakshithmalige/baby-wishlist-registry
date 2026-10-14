@@ -93,16 +93,29 @@ class FileBackend {
 // Talks to Supabase's REST API (PostgREST). The table has one row (id = 1)
 // and a `rev` column. A save only succeeds if `rev` is still the value we read,
 // so two servers can never overwrite each other's changes.
+//
+// Two keys are sent. The anon key is the public project key, which PostgREST
+// needs to accept the request. The registry secret is what row-level security
+// checks (see supabase/schema.sql): without it the table reads as empty.
 class SupabaseBackend {
-  constructor({ url, key, fetchImpl = fetch }) {
-    if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_KEY must both be set.');
+  constructor({ url, anonKey, registrySecret, fetchImpl = fetch }) {
+    if (!url || !anonKey || !registrySecret) {
+      throw new Error('SUPABASE_URL, SUPABASE_ANON_KEY and REGISTRY_SECRET must all be set.');
+    }
     this.endpoint = `${url.replace(/\/$/, '')}/rest/v1/registry`;
-    this.key = key;
+    this.anonKey = anonKey;
+    this.registrySecret = registrySecret;
     this.fetch = fetchImpl;
   }
 
   headers(extra = {}) {
-    return { apikey: this.key, Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json', ...extra };
+    return {
+      apikey: this.anonKey,
+      Authorization: `Bearer ${this.anonKey}`,
+      'x-registry-key': this.registrySecret,
+      'Content-Type': 'application/json',
+      ...extra,
+    };
   }
 
   async init(makeInitial) {
@@ -117,7 +130,8 @@ class SupabaseBackend {
 
   async load() {
     const row = await this.#row();
-    if (!row) throw new Error('Registry row is missing. Run supabase/schema.sql first.');
+    // With the wrong registry secret, row-level security hides the row, so both causes look the same.
+    if (!row) throw new Error('No registry row is visible. Run supabase/schema.sql and check REGISTRY_SECRET.');
     return { state: row.data, token: row.rev };
   }
 

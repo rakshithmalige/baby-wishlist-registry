@@ -26,7 +26,8 @@ Open the share link printed in the terminal, for example `http://localhost:3000/
 |---|---|---|---|
 | `OWNER_PASSCODE` | yes | — | Passcode for owner sign-in. Minimum 8 characters. |
 | `SUPABASE_URL` | for Vercel | — | Supabase project URL. When set, the list is stored in Supabase instead of a file. |
-| `SUPABASE_SERVICE_KEY` | with `SUPABASE_URL` | — | Supabase secret (service) key. Server-side only, never put it in the page. |
+| `SUPABASE_ANON_KEY` | with `SUPABASE_URL` | — | Supabase public anon key. Access still needs `REGISTRY_SECRET`. |
+| `REGISTRY_SECRET` | with `SUPABASE_URL` | — | Random key the server sends to Supabase. Stored only as a hash in the database. Keep it secret. |
 | `LIST_TITLE` | no | `Baby Registry` | Heading shown on the list. |
 | `PORT` | no | `3000` | HTTP port (local server only). |
 | `DATA_FILE` | no | `data/registry.json` | Where the list is saved when `SUPABASE_URL` is not set. |
@@ -38,18 +39,19 @@ The share token is generated the first time the registry is created and stored w
 ## Where the list is stored
 
 - **A file** (default): fine for running on your own computer or a host with a persistent disk. Used by the Docker setup below.
-- **Supabase Postgres**: used on Vercel, where functions do not keep files between requests. Set up with [supabase/schema.sql](supabase/schema.sql). Saves are compare-and-swap, so two servers cannot overwrite each other's changes.
+- **Supabase Postgres**: used on Vercel, where functions do not keep files between requests. Set up with [supabase/schema.sql](supabase/schema.sql). Saves are compare-and-swap, so two servers cannot overwrite each other's changes. Without `REGISTRY_SECRET` the table reads as empty, so the public anon key alone reveals nothing.
 
 ## Deploy to Vercel
 
 The app is a static page in `public/` plus one serverless function in `api/`. `vercel.json` routes the links, and a daily cron calls `/api/health` so the free Supabase project does not pause from inactivity.
 
-1. Create a Supabase project and run `supabase/schema.sql` in its SQL editor.
+1. Create a Supabase project. In its SQL editor, run `supabase/schema.sql` after replacing the placeholder hash with the SHA-256 of your registry key.
 2. Create a Vercel project from this repository (or deploy the files directly).
-3. In Vercel, add these environment variables (mark the passcode and service key as **Sensitive**):
+3. In Vercel, add these environment variables (mark the passcode and keys as **Sensitive**):
    - `OWNER_PASSCODE`
    - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_KEY`
+   - `SUPABASE_ANON_KEY`
+   - `REGISTRY_SECRET`
 4. Deploy. The share link is `https://<your-project>.vercel.app/l/<token>`. The token is created on first run. Sign in and use **Copy share link** to get the full link.
 
 Vercel sets `VERCEL=1`, which turns on secure cookies and proxy-aware rate limits automatically.
@@ -118,5 +120,5 @@ docs/PLAN.md       product plan, user stories, sprint log
 - Links must be `http` or `https`.
 - The page sends `Referrer-Policy: no-referrer`, so the share token does not leak to shop links.
 - Guest ticks store no name or identity. Each browser's device id is hashed before it is stored.
-- The Supabase table has row-level security on with no policies. Only the server's secret key can read or write it.
+- The Supabase table has row-level security on. Reads and writes need the `x-registry-key` header, and only a hash of the key is stored in the database.
 - Ticks and sign-in attempts are rate limited per IP.

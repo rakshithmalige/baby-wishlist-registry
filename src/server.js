@@ -11,7 +11,11 @@ async function createServer(env = process.env) {
   if (passcode.length < 8) throw new Error('Set OWNER_PASSCODE to at least 8 characters before starting.');
 
   const backend = env.SUPABASE_URL
-    ? new SupabaseBackend({ url: env.SUPABASE_URL, key: env.SUPABASE_SERVICE_KEY || '' })
+    ? new SupabaseBackend({
+        url: env.SUPABASE_URL,
+        anonKey: env.SUPABASE_ANON_KEY || '',
+        registrySecret: env.REGISTRY_SECRET || '',
+      })
     : new FileBackend(env.DATA_FILE || path.join(__dirname, '..', 'data', 'registry.json'));
 
   const store = new Registry(backend);
