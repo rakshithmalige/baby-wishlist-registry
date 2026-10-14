@@ -279,6 +279,18 @@ test('the health check reads the registry and reports ok', async () => {
   assert.deepEqual(res.data, { ok: true });
 });
 
+test('API calls also work through the single-segment route the page uses', async () => {
+  const list = await call('GET', `/api/route?p=${encodeURIComponent(`lists/${shareToken}`)}`);
+  assert.equal(list.status, 200);
+  assert.equal(list.data.title, 'Test Registry');
+
+  const login = await call('POST', `/api/route?p=${encodeURIComponent('owner/login')}`, {
+    body: { passcode: PASSCODE },
+  });
+  assert.equal(login.status, 200);
+  assert.match(login.headers.get('set-cookie'), /owner_session=/);
+});
+
 // ---- Sprint 2: undo, quantities, rate limits ------------------------------
 
 test('a browser sees which items it ticked, so it can offer an undo', async () => {

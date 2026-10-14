@@ -393,13 +393,18 @@ function createApp({
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
+    // The page sends every API call to /api/route?p=<path>. This project's
+    // Vercel deployment only reaches single-segment /api paths, so the real
+    // path travels in ?p=.
+    const pathname =
+      url.pathname === '/api/route' && url.searchParams.has('p') ? `/api/${url.searchParams.get('p')}` : url.pathname;
 
-    if (req.method === 'GET' && (STATIC_FILES[url.pathname] || LIST_PAGE.test(url.pathname))) {
-      return sendPage(res, url.pathname);
+    if (req.method === 'GET' && (STATIC_FILES[pathname] || LIST_PAGE.test(pathname))) {
+      return sendPage(res, pathname);
     }
 
     for (const [method, pattern, handler] of ROUTES) {
-      const match = url.pathname.match(pattern);
+      const match = pathname.match(pattern);
       if (!match || method !== req.method) continue;
 
       if (req.method !== 'GET') {

@@ -77,16 +77,18 @@
     return data;
   }
 
-  const listUrl = () => `/api/lists/${encodeURIComponent(token)}`;
-  const itemUrl = (id) => `${listUrl()}/items/${encodeURIComponent(id)}`;
+  // Every call goes to /api/route?p=<path>. See the note in src/app.js.
+  const apiUrl = (path, query = '') => `/api/route?p=${encodeURIComponent(path)}${query}`;
+  const listPath = () => `lists/${encodeURIComponent(token)}`;
+  const itemPath = (id) => `${listPath()}/items/${encodeURIComponent(id)}`;
 
   // full: true skips the cheap "has anything changed?" check.
   async function refresh({ full = false } = {}) {
     if (!token || stopped) return;
     const seq = ++requestSeq;
-    const query = !full && list ? `?version=${list.version}` : '';
+    const query = !full && list ? `&version=${list.version}` : '';
     try {
-      const data = await api('GET', listUrl() + query);
+      const data = await api('GET', apiUrl(listPath(), query));
       if (seq !== requestSeq) return;
       online = true;
       if (!data.unchanged) {
@@ -249,7 +251,7 @@
 
   async function claim(item) {
     try {
-      await api('POST', `${itemUrl(item.id)}/bought`);
+      await api('POST', apiUrl(`${itemPath(item.id)}/bought`));
       notify(`Thank you! "${item.name}" is marked as bought.`);
     } catch (err) {
       notify(err.message);
@@ -259,7 +261,7 @@
 
   async function unclaim(item) {
     try {
-      await api('DELETE', `${itemUrl(item.id)}/bought`);
+      await api('DELETE', apiUrl(`${itemPath(item.id)}/bought`));
       notify(`Undone for "${item.name}".`);
     } catch (err) {
       notify(err.message);
@@ -270,7 +272,7 @@
   async function removeItem(item) {
     if (!window.confirm(`Delete "${item.name}" from the list?`)) return;
     try {
-      await api('DELETE', itemUrl(item.id));
+      await api('DELETE', apiUrl(itemPath(item.id)));
       notify('Item deleted');
     } catch (err) {
       notify(err.message);
@@ -309,7 +311,7 @@
   els.loginForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
-      await api('POST', '/api/owner/login', { passcode: els.loginForm.elements.passcode.value });
+      await api('POST', apiUrl('owner/login'), { passcode: els.loginForm.elements.passcode.value });
       els.loginForm.reset();
       notify('Signed in');
     } catch (err) {
@@ -320,7 +322,7 @@
 
   els.logout.addEventListener('click', async () => {
     try {
-      await api('POST', '/api/owner/logout', {});
+      await api('POST', apiUrl('owner/logout'), {});
       notify('Signed out');
     } catch (err) {
       notify(err.message);
@@ -342,7 +344,7 @@
   els.addForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
-      await api('POST', `${listUrl()}/items`, readItemForm(els.addForm));
+      await api('POST', apiUrl(`${listPath()}/items`), readItemForm(els.addForm));
       els.addForm.reset();
       notify('Added to the list');
     } catch (err) {
@@ -354,7 +356,7 @@
   els.editForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
-      await api('PATCH', itemUrl(editingId), readItemForm(els.editForm));
+      await api('PATCH', apiUrl(itemPath(editingId)), readItemForm(els.editForm));
       els.editDialog.close();
       notify('Changes saved');
     } catch (err) {
