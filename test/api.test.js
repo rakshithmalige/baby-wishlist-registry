@@ -530,3 +530,135 @@ test('changing the passcode signs out every existing session', async () => {
     await rotated.close();
   }
 });
+
+// ---- Categories, holds, names, backup, home-screen manifest ------------------
+
+test('gifts carry a category and a most-wanted flag; bad values are refused', async () => {
+  const item = await addItem({ name: 'Bottles', category: 'Feeding', priority: true });
+  assert.equal(item.category, 'Feeding');
+  assert.equal(item.priority, true);
+
+  const plain = await addItem({ name: 'Socks' });
+  assert.equal(plain.category, 'Other');
+  assert.equal(plain.priority, false);
+
+  const badCategory = await call('POST', `${listPath()}/items`, { body: { name: 'x', category: 'Cars' }, cookie: ownerCookie });
+  assert.equal(badCategory.status, 400);
+  assert.match(badCategory.data.error, /Category must be one of/);
+
+  const badPriority = await call('POST', `${listPath()}/items`, { body: { name: 'x', priority: 'yes' }, cookie: ownerCookie });
+  assert.equal(badPriority.status, 400);
+});
+
+test('a hold reserves one unit for this browser, and ticking it becomes a purchase', async () => {
+  const item = await addItem({ name: 'Last travel cot' });
+  const held = await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_A) });
+  assert.equal(held.status, 200);
+  assert.equal(held.data.item.holding, true);
+  assert.equal(held.data.item.reservedCount, 1);
+  assert.ok(held.data.item.reservedUntil);
+
+  const other = await call('GET', listPath(), { headers: device(DEVICE_B) });
+  const seen = other.data.items.find((i) => i.id === item.id);
+  assert.equal(seen.holding, false);
+  assert.equal(seen.reservedCount, 1);
+
+  const second = await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_B) });
+  assert.equal(second.status, 409);
+
+  const again = await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_A) });
+  assert.equal(again.status, 409);
+  assert.match(again.data.error, /already have this reserved/);
+
+  const ticked = await tick(item.id, DEVICE_A);
+  assert.equal(ticked.status, 200);
+  assert.equal(ticked.data.item.bought, true);
+  assert.equal(ticked.data.item.reservedCount, 0);
+  assert.equal(ticked.data.item.holding, false);
+});
+
+test('only the browser that reserved an item can release it; owners can release any', async () => {
+  const item = await addItem({ name: 'Rocking chair' });
+  await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_A) });
+
+  const stranger = await call('DELETE', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_B) });
+  assert.equal(stranger.status, 403);
+
+  const owner = await call('DELETE', `${listPath()}/items/${item.id}/hold`, { cookie: ownerCookie });
+  assert.equal(owner.status, 200);
+  assert.equal(owner.data.item.reservedCount, 0);
+});
+
+test('an expired hold stops counting, so the gift can be reserved again', async () => {
+  const item = await addItem({ name: 'Expiring gift' });
+  await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_A) });
+
+  // Push the hold into the past, as if its 48 hours had passed.
+  await store.update((state) => {
+    const target = state.items.find((i) => i.id === item.id);
+    for (const claim of target.claims) if (claim.expiresAt) claim.expiresAt = new Date(Date.now() - 1000).toISOString();
+  });
+
+  const seen = await call('GET', listPath(), { headers: device(DEVICE_B) });
+  assert.equal(seen.data.items.find((i) => i.id === item.id).reservedCount, 0);
+
+  const rehold = await call('POST', `${listPath()}/items/${item.id}/hold`, { headers: device(DEVICE_B) });
+  assert.equal(rehold.status, 200);
+});
+
+test('a name left on a tick is only visible to owners; blank means anonymous', async () => {
+  const item = await addItem({ name: 'Mobile', quantity: 2 });
+  const named = await call('POST', `${listPath()}/items/${item.id}/bought`, {
+    headers: device(DEVICE_A),
+    body: { name: 'Aunt Sue' },
+  });
+  assert.equal(named.status, 200);
+
+  const anonymous = await call('POST', `${listPath()}/items/${item.id}/bought`, {
+    headers: device(DEVICE_B),
+    body: { name: '   ' },
+  });
+  assert.equal(anonymous.status, 200);
+
+  const tooLong = await call('POST', `${listPath()}/items/${item.id}/bought`, {
+    headers: device(DEVICE_C),
+    body: { name: 'x'.repeat(41) },
+  });
+  assert.equal(tooLong.status, 400);
+
+  const guest = await call('GET', listPath(), { headers: device(DEVICE_C) });
+  assert.equal('boughtBy' in guest.data.items.find((i) => i.id === item.id), false);
+
+  const owner = await call('GET', listPath(), { cookie: ownerCookie });
+  assert.deepEqual(owner.data.items.find((i) => i.id === item.id).boughtBy, ['Aunt Sue', 'Anonymous']);
+});
+
+test('the backup download is for owners only and arrives as a file', async () => {
+  const guest = await call('GET', `/api/lists/${shareToken}/backup`);
+  assert.equal(guest.status, 401);
+
+  const owner = await call('GET', `/api/lists/${shareToken}/backup`, { cookie: ownerCookie });
+  assert.equal(owner.status, 200);
+  assert.match(owner.headers.get('content-disposition'), /^attachment; filename="baby-registry-backup-\d{4}-\d{2}-\d{2}\.json"$/);
+  assert.ok(Array.isArray(owner.data.items));
+});
+
+test('the list page gets a home-screen manifest that opens that list', async () => {
+  const start = `/l/${shareToken}`;
+  const res = await call('GET', `/api/route?p=manifest&start=${encodeURIComponent(start)}`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /application\/manifest\+json/);
+  assert.equal(res.data.start_url, start);
+  assert.equal(res.data.display, 'standalone');
+
+  const unsafe = await call('GET', `/api/route?p=manifest&start=${encodeURIComponent('https://evil.example')}`);
+  assert.equal(unsafe.data.start_url, '/');
+});
+
+test('home-screen icons are served as PNG images', async () => {
+  for (const file of ['/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']) {
+    const res = await call('GET', file);
+    assert.equal(res.status, 200, file);
+    assert.equal(res.headers.get('content-type'), 'image/png', file);
+  }
+});

@@ -275,3 +275,99 @@ dialog form { display: grid; gap: 14px; }
 @media (prefers-reduced-motion: reduce) {
   .progress-fill, button { transition: none; }
 }
+
+/* ---- Forms, chips, tags, holds, thank-you list, print ------------------ */
+
+select {
+  width: 100%;
+  font: inherit;
+  font-size: 16px;
+  padding: 11px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fffdfd;
+  color: var(--ink);
+}
+
+label.inline { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+label.inline > input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--rose);
+}
+
+.giver-card { gap: 8px; }
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+.chip {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  color: var(--ink-soft);
+}
+.chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+.item-meta { margin: 0 0 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.tag {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #f3edf6;
+  color: #5b4d66;
+}
+.star {
+  font-size: 0.75rem;
+  font-weight: 800;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #fff1c9;
+  color: #7a5a00;
+}
+
+.badge-hold { background: #fff1c9; color: #7a5a00; }
+.item-by { margin: 6px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
+
+button.ghost {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 0.875rem;
+  background: #fff;
+  border-color: var(--line);
+  color: var(--rose-deep);
+}
+
+.footer-row { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 4px; }
+a.link-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 8px;
+  color: var(--rose-deep);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.thank-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.thank-list li {
+  background: var(--mint-soft);
+  border-radius: var(--radius-sm);
+  padding: 9px 14px;
+  font-weight: 600;
+}
+
+@media print {
+  body { background: #fff; }
+  .hero-emoji, .progress-wrap, .giver-card, #filters, #add-form, #login-form, #thank-you,
+  .notice, .footer, #status, .item-actions, .qty-row button, .count { display: none !important; }
+  .card, .item { box-shadow: none; border: 1px solid #bbb; break-inside: avoid; }
+  .is-bought { background: #fff; }
+  .item-name a { color: #000; }
+  .hero h1 { font-size: 1.6rem; }
+}

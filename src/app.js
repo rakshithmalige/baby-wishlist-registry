@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { newItem, publicItem } = require('./store');
+const { newItem, publicItem, confirmedClaims, activeHolds, pruneHolds, CATEGORIES, HOLD_MS } = require('./store');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const SESSION_COOKIE = 'owner_session';
@@ -21,6 +21,9 @@ const STATIC_FILES = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   '/styles.css': { file: 'styles.css', type: 'text/css; charset=utf-8' },
+  '/icon-192.png': { file: 'icon-192.png', type: 'image/png' },
+  '/icon-512.png': { file: 'icon-512.png', type: 'image/png' },
+  '/apple-touch-icon.png': { file: 'apple-touch-icon.png', type: 'image/png' },
 };
 const LIST_PAGE = /^\/l\/[A-Za-z0-9_-]+\/?$/;
 
@@ -215,6 +218,23 @@ function createApp({
     return n;
   }
 
+  function cleanCategory(value) {
+    if (value === undefined || value === null || value === '') return 'Other';
+    if (!CATEGORIES.includes(value)) throw new HttpError(400, `Category must be one of: ${CATEGORIES.join(', ')}`);
+    return value;
+  }
+
+  function cleanPriority(value) {
+    if (value === undefined || value === null) return false;
+    if (typeof value !== 'boolean') throw new HttpError(400, 'Most wanted must be true or false');
+    return value;
+  }
+
+  // The optional first name a guest can leave on a tick. Blank means anonymous.
+  function cleanGiverName(value) {
+    return cleanText(value, 40, 'Your name') || null;
+  }
+
   // Full item input for create; only the fields present for partial (edit).
   function cleanItemInput(input, { partial = false } = {}) {
     const fields = {};
@@ -226,6 +246,8 @@ function createApp({
     if (!partial || 'link' in input) fields.link = cleanLink(input.link);
     if (!partial || 'notes' in input) fields.notes = cleanText(input.notes, 500, 'Notes');
     if (!partial || 'quantity' in input) fields.quantity = cleanQuantity(input.quantity);
+    if (!partial || 'category' in input) fields.category = cleanCategory(input.category);
+    if (!partial || 'priority' in input) fields.priority = cleanPriority(input.priority);
     return fields;
   }
 
@@ -251,11 +273,12 @@ function createApp({
     }
   }
 
-  function snapshot(state, device) {
+  function snapshot(state, device, owner) {
+    const now = Date.now();
     return {
       version: state.version,
       updatedAt: state.updatedAt,
-      items: state.items.map((item) => publicItem(item, device)),
+      items: state.items.map((item) => publicItem(item, device, { owner, now })),
     };
   }
 
@@ -270,7 +293,7 @@ function createApp({
     if (version !== null && Number(version) === state.version) {
       return { body: { version: state.version, unchanged: true, owner } };
     }
-    return { body: { title, ...snapshot(state, device), owner } };
+    return { body: { title, ...snapshot(state, device, owner), owner } };
   }
 
   function login({ req, body }) {
@@ -300,7 +323,7 @@ function createApp({
       state.items.push(created);
       return created;
     });
-    return { status: 201, body: { item: publicItem(item, deviceHashFrom(req)) } };
+    return { status: 201, body: { item: publicItem(item, deviceHashFrom(req), { owner: true }) } };
   }
 
   async function editItem({ req, params, body }) {
@@ -310,13 +333,14 @@ function createApp({
       const target = itemOrThrow(state, params[1]);
       const fields = cleanItemInput(body, { partial: true });
       if (Object.keys(fields).length === 0) throw new HttpError(400, 'Nothing to change');
-      if (fields.quantity !== undefined && fields.quantity < target.claims.length) {
-        throw new HttpError(400, `Quantity cannot be lower than the ${target.claims.length} already bought`);
+      const bought = confirmedClaims(target).length;
+      if (fields.quantity !== undefined && fields.quantity < bought) {
+        throw new HttpError(400, `Quantity cannot be lower than the ${bought} already bought`);
       }
       Object.assign(target, fields, { updatedAt: new Date().toISOString() });
       return target;
     });
-    return { body: { item: publicItem(item, deviceHashFrom(req)) } };
+    return { body: { item: publicItem(item, deviceHashFrom(req), { owner: true }) } };
   }
 
   async function deleteItem({ req, params }) {
@@ -329,28 +353,34 @@ function createApp({
     return { body: { ok: true } };
   }
 
-  // Anyone with the link can claim one of an item (guests and owners alike).
-  async function markBought({ req, params }) {
+  // Anyone with the link can tick an item (guests and owners alike). If this
+  // browser is holding the item, the tick turns the hold into a bought claim.
+  async function markBought({ req, params, body }) {
     enforce(limitTicks, req);
     const device = requireDevice(req);
+    const giver = cleanGiverName(body.name);
     const item = await store.update((state) => {
       checkToken(state, params[0]);
       const target = itemOrThrow(state, params[1]);
-      if (target.claims.length >= target.quantity) {
+      pruneHolds(target);
+      const bought = confirmedClaims(target).length;
+      if (bought >= target.quantity) {
         const message =
           target.quantity === 1 ? 'Someone already marked this one as bought' : 'All of these have already been bought';
         throw new HttpError(409, message, { item: publicItem(target, device) });
       }
       const now = new Date().toISOString();
-      target.claims.push({ id: crypto.randomUUID(), by: device, at: now });
+      const ownHold = target.claims.find((claim) => claim.expiresAt && claim.by === device);
+      if (ownHold) target.claims = target.claims.filter((claim) => claim !== ownHold);
+      target.claims.push({ id: crypto.randomUUID(), by: device, at: now, name: giver });
       target.updatedAt = now;
       return target;
     });
     return { body: { item: publicItem(item, device) } };
   }
 
-  // Owners can undo the latest claim on an item. Guests can undo only the
-  // latest claim made from their own browser.
+  // Owners can undo the latest bought claim on an item. Guests can undo only
+  // the latest claim made from their own browser.
   async function unmarkBought({ req, params }) {
     enforce(limitTicks, req);
     const owner = isOwner(req);
@@ -358,7 +388,8 @@ function createApp({
     const item = await store.update((state) => {
       checkToken(state, params[0]);
       const target = itemOrThrow(state, params[1]);
-      const undoable = owner ? target.claims : target.claims.filter((claim) => device && claim.by === device);
+      const bought = confirmedClaims(target);
+      const undoable = owner ? bought : bought.filter((claim) => device && claim.by === device);
       if (undoable.length === 0) {
         if (owner) throw new HttpError(409, 'Nothing to undo on this item');
         throw new HttpError(403, 'Only the browser that ticked this can undo it');
@@ -371,6 +402,95 @@ function createApp({
     return { body: { item: publicItem(item, device) } };
   }
 
+  // Reserve one unit for this browser for 48 hours. Holds count against what
+  // is still free, so two people cannot both hold the last one.
+  async function holdItem({ req, params }) {
+    enforce(limitTicks, req);
+    const device = requireDevice(req);
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      const now = Date.now();
+      pruneHolds(target, now);
+      const bought = confirmedClaims(target).length;
+      if (bought >= target.quantity) {
+        const message =
+          target.quantity === 1 ? 'Someone already marked this one as bought' : 'All of these have already been bought';
+        throw new HttpError(409, message, { item: publicItem(target, device) });
+      }
+      if (target.claims.some((claim) => claim.expiresAt && claim.by === device)) {
+        throw new HttpError(409, 'You already have this reserved', { item: publicItem(target, device) });
+      }
+      const free = target.quantity - bought - activeHolds(target, now).length;
+      if (free <= 0) {
+        throw new HttpError(409, 'All of these are reserved right now. Please try again later.', {
+          item: publicItem(target, device),
+        });
+      }
+      const at = new Date(now).toISOString();
+      target.claims.push({ id: crypto.randomUUID(), by: device, at, expiresAt: new Date(now + HOLD_MS).toISOString() });
+      target.updatedAt = at;
+      return target;
+    });
+    return { body: { item: publicItem(item, device) } };
+  }
+
+  // A browser can release its own hold. An owner can release any hold.
+  async function releaseHold({ req, params }) {
+    enforce(limitTicks, req);
+    const owner = isOwner(req);
+    const device = deviceHashFrom(req);
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      const holds = activeHolds(target).sort((a, b) => a.expiresAt.localeCompare(b.expiresAt));
+      // Your own hold first; an owner with no hold of their own releases the soonest one.
+      const victim = holds.find((hold) => device && hold.by === device) || (owner ? holds[0] : null);
+      if (!victim) {
+        if (owner) throw new HttpError(409, 'Nothing is reserved on this item');
+        throw new HttpError(403, 'Only the browser that reserved this can release it');
+      }
+      target.claims = target.claims.filter((claim) => claim.id !== victim.id);
+      target.updatedAt = new Date().toISOString();
+      return target;
+    });
+    return { body: { item: publicItem(item, device) } };
+  }
+
+  // Owners only: the whole list as a JSON file, for keeping a copy.
+  async function backup({ req, params }) {
+    requireOwner(req);
+    const state = await store.read();
+    checkToken(state, params[0]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    return {
+      body: state,
+      headers: { 'Content-Disposition': `attachment; filename="baby-registry-backup-${stamp}.json"` },
+    };
+  }
+
+  // The web app manifest for a list page, so "Add to Home Screen" opens that
+  // list. The start address is only accepted in the list-page form.
+  function manifest({ url }) {
+    const start = url.searchParams.get('start') || '';
+    return {
+      body: {
+        name: title,
+        short_name: 'Baby Registry',
+        start_url: LIST_PAGE.test(start) ? start : '/',
+        scope: '/',
+        display: 'standalone',
+        background_color: '#fff8f3',
+        theme_color: '#b8476a',
+        icons: [
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+        ],
+      },
+      headers: { 'Content-Type': 'application/manifest+json; charset=utf-8' },
+    };
+  }
+
   // Reads the registry, so a daily ping keeps a free-tier database from pausing.
   async function health() {
     await store.read();
@@ -379,7 +499,9 @@ function createApp({
 
   const ROUTES = [
     ['GET', /^\/api\/health$/, health],
+    ['GET', /^\/api\/manifest$/, manifest],
     ['GET', /^\/api\/lists\/([^/]+)$/, getList],
+    ['GET', /^\/api\/lists\/([^/]+)\/backup$/, backup],
     ['POST', /^\/api\/owner\/login$/, login],
     ['POST', /^\/api\/owner\/logout$/, logout],
     ['POST', /^\/api\/lists\/([^/]+)\/items$/, addItem],
@@ -387,6 +509,8 @@ function createApp({
     ['DELETE', /^\/api\/lists\/([^/]+)\/items\/([^/]+)$/, deleteItem],
     ['POST', /^\/api\/lists\/([^/]+)\/items\/([^/]+)\/bought$/, markBought],
     ['DELETE', /^\/api\/lists\/([^/]+)\/items\/([^/]+)\/bought$/, unmarkBought],
+    ['POST', /^\/api\/lists\/([^/]+)\/items\/([^/]+)\/hold$/, holdItem],
+    ['DELETE', /^\/api\/lists\/([^/]+)\/items\/([^/]+)\/hold$/, releaseHold],
   ];
 
   // ---- request dispatch --------------------------------------------------

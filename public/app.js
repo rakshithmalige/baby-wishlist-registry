@@ -3,6 +3,8 @@
 
   const POLL_MS = 10000;
   const DEVICE_KEY = 'wishlist-device-id';
+  const GIVER_KEY = 'wishlist-giver-name';
+  const CATEGORIES = ['Nursery', 'Clothes', 'Feeding', 'Bath & care', 'Travel', 'Toys', 'Other'];
   const tokenMatch = location.pathname.match(/^\/l\/([A-Za-z0-9_-]+)\/?$/);
   const token = tokenMatch ? tokenMatch[1] : null;
   const $ = (id) => document.getElementById(id);
@@ -16,11 +18,17 @@
     noList: $('no-list'),
     loginForm: $('login-form'),
     addForm: $('add-form'),
+    giverName: $('giver-name'),
+    filters: $('filters'),
     items: $('items'),
     empty: $('empty'),
+    thankYou: $('thank-you'),
+    thankYouList: $('thank-you-list'),
     ownerToggle: $('owner-toggle'),
     ownerTools: $('owner-tools'),
     copyLink: $('copy-link'),
+    backup: $('backup'),
+    print: $('print'),
     logout: $('logout'),
     editDialog: $('edit-dialog'),
     editForm: $('edit-form'),
@@ -34,6 +42,7 @@
   let stopped = false;
   let editingId = null;
   let noticeTimer = null;
+  let filter = 'all'; // 'all', 'most', or a category name
 
   // ---- device id -----------------------------------------------------------
   // A random id kept in this browser. The server stores only a hash of it, so
@@ -122,18 +131,73 @@
     els.progressBar.hidden = items.length === 0;
     els.progressFill.style.width = `${items.length ? Math.round((boughtCount / items.length) * 100) : 0}%`;
 
-    // Still-needed items first, bought ones sink to the bottom.
-    const ordered = [...items.filter((item) => !item.bought), ...items.filter((item) => item.bought)];
-    els.items.replaceChildren(...ordered.map((item) => renderItem(item, owner)));
-    els.items.hidden = items.length === 0;
+    renderFilters(items);
+    const visible = orderItems(items.filter(matchesFilter));
+    els.items.replaceChildren(...visible.map((item) => renderItem(item, owner)));
+    els.items.hidden = visible.length === 0;
 
-    els.empty.textContent = owner ? 'No treasures yet. Add the first one below ✨' : 'No treasures on the list yet 🧸';
-    els.empty.hidden = items.length !== 0;
+    if (items.length === 0) {
+      els.empty.textContent = owner ? 'No treasures yet. Add the first one below ✨' : 'No treasures on the list yet 🧸';
+    } else {
+      els.empty.textContent = 'Nothing in this filter yet. Try another one.';
+    }
+    els.empty.hidden = visible.length !== 0;
+
+    renderThankYou(items, owner);
 
     els.addForm.hidden = !owner;
     if (owner) els.loginForm.hidden = true;
     els.ownerToggle.hidden = owner;
     els.ownerTools.hidden = !owner;
+  }
+
+  // Still-needed items first; "most wanted" leads among them; bought ones sink.
+  // Sorting is stable, so creation order is kept within each group.
+  function orderItems(items) {
+    const rank = (item) => (item.bought ? 2 : item.priority ? 0 : 1);
+    return [...items].sort((a, b) => rank(a) - rank(b));
+  }
+
+  function matchesFilter(item) {
+    if (filter === 'all') return true;
+    if (filter === 'most') return item.priority;
+    return item.category === filter;
+  }
+
+  function renderFilters(items) {
+    const present = new Set(items.map((item) => item.category));
+    const chips = [['all', 'All']];
+    if (items.some((item) => item.priority)) chips.push(['most', '★ Most wanted']);
+    for (const category of CATEGORIES) if (present.has(category)) chips.push([category, category]);
+    if (!chips.some(([value]) => value === filter)) filter = 'all';
+
+    els.filters.replaceChildren(
+      ...chips.map(([value, label]) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.textContent = label;
+        chip.setAttribute('aria-pressed', String(filter === value));
+        chip.addEventListener('click', () => {
+          filter = value;
+          render();
+        });
+        return chip;
+      }),
+    );
+    els.filters.hidden = items.length === 0;
+  }
+
+  function renderThankYou(items, owner) {
+    const given = items.filter((item) => owner && item.boughtBy && item.boughtBy.length > 0);
+    els.thankYou.hidden = given.length === 0;
+    els.thankYouList.replaceChildren(
+      ...given.map((item) => {
+        const li = document.createElement('li');
+        li.textContent = `${item.name} — ${item.boughtBy.join(', ')}`;
+        return li;
+      }),
+    );
   }
 
   function renderItem(item, owner) {
@@ -143,6 +207,7 @@
     // Owners can undo anything. Guests can undo only what their own browser ticked.
     const canUndo = owner || item.mine;
     const multi = item.quantity > 1;
+    const free = item.quantity - item.boughtCount - item.reservedCount;
 
     let marker;
     if (multi) {
@@ -162,6 +227,24 @@
 
     const body = document.createElement('div');
     body.className = 'item-body';
+
+    if (item.priority || item.category) {
+      const meta = document.createElement('p');
+      meta.className = 'item-meta';
+      if (item.priority) {
+        const star = document.createElement('span');
+        star.className = 'star';
+        star.textContent = '★ Most wanted';
+        meta.append(star);
+      }
+      if (item.category) {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = item.category;
+        meta.append(tag);
+      }
+      body.append(meta);
+    }
 
     const name = document.createElement('p');
     name.className = 'item-name';
@@ -204,6 +287,33 @@
       body.append(badge);
     }
 
+    if (item.holding) {
+      body.append(holdBadge(`Reserved for you · until ${formatTime(item.reservedUntil)}`));
+    } else if (item.reservedCount > 0 && !item.bought) {
+      body.append(holdBadge(`Reserved by someone · until ${formatTime(item.reservedUntil)}`));
+    }
+
+    if (owner && item.boughtBy && item.boughtBy.length > 0) {
+      const by = document.createElement('p');
+      by.className = 'item-by';
+      by.textContent = `Bought by ${item.boughtBy.join(', ')}`;
+      body.append(by);
+    }
+
+    const holdActions = [];
+    if (!item.bought && !item.holding && free > 0) {
+      holdActions.push(actionButton('Reserve for 2 days', () => hold(item), 'ghost'));
+    }
+    if (item.holding || (owner && item.reservedCount > 0)) {
+      holdActions.push(actionButton(item.holding ? 'Release' : 'Release hold', () => release(item), 'ghost'));
+    }
+    if (holdActions.length) {
+      const row = document.createElement('div');
+      row.className = 'item-actions';
+      row.append(...holdActions);
+      body.append(row);
+    }
+
     if (owner) {
       const actions = document.createElement('div');
       actions.className = 'item-actions';
@@ -213,6 +323,13 @@
 
     li.append(marker, body);
     return li;
+  }
+
+  function holdBadge(text) {
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-hold';
+    badge.textContent = text;
+    return badge;
   }
 
   function actionButton(label, onClick, className = '', disabled = false) {
@@ -254,9 +371,14 @@
 
   // ---- actions -------------------------------------------------------------
 
+  // The optional first name a guest leaves on a tick. Only owners see it.
+  function giverName() {
+    return els.giverName.value.trim();
+  }
+
   async function claim(item) {
     try {
-      await api('POST', apiUrl(`${itemPath(item.id)}/bought`));
+      await api('POST', apiUrl(`${itemPath(item.id)}/bought`), { name: giverName() });
       notify(`Thank you! "${item.name}" is marked as bought.`);
     } catch (err) {
       notify(err.message);
@@ -268,6 +390,26 @@
     try {
       await api('DELETE', apiUrl(`${itemPath(item.id)}/bought`));
       notify(`Undone for "${item.name}".`);
+    } catch (err) {
+      notify(err.message);
+    }
+    await refresh({ full: true });
+  }
+
+  async function hold(item) {
+    try {
+      await api('POST', apiUrl(`${itemPath(item.id)}/hold`));
+      notify(`"${item.name}" is reserved for you for 2 days.`);
+    } catch (err) {
+      notify(err.message);
+    }
+    await refresh({ full: true });
+  }
+
+  async function release(item) {
+    try {
+      await api('DELETE', apiUrl(`${itemPath(item.id)}/hold`));
+      notify(`Released "${item.name}".`);
     } catch (err) {
       notify(err.message);
     }
@@ -290,6 +432,8 @@
     const { elements } = els.editForm;
     elements.name.value = item.name;
     elements.quantity.value = item.quantity;
+    elements.category.value = item.category || 'Other';
+    elements.priority.checked = item.priority === true;
     elements.link.value = item.link || '';
     elements.notes.value = item.notes || '';
     els.editDialog.showModal();
@@ -301,6 +445,8 @@
     return {
       name: elements.name.value,
       quantity: elements.quantity.value,
+      category: elements.category.value,
+      priority: elements.priority.checked,
       link: elements.link.value,
       notes: elements.notes.value,
     };
@@ -344,6 +490,8 @@
     }
   });
 
+  els.print.addEventListener('click', () => window.print());
+
   // ---- add and edit -------------------------------------------------------
 
   els.addForm.addEventListener('submit', async (event) => {
@@ -379,6 +527,7 @@
   }
 
   function formatTime(iso) {
+    if (!iso) return '';
     return new Date(iso).toLocaleString([], {
       month: 'short',
       day: 'numeric',
@@ -389,10 +538,33 @@
 
   // ---- start ---------------------------------------------------------------
 
+  // Remember the name a guest typed, on this device only.
+  try {
+    els.giverName.value = localStorage.getItem(GIVER_KEY) || '';
+  } catch {
+    // storage blocked: the name is simply not remembered
+  }
+  els.giverName.addEventListener('input', () => {
+    try {
+      localStorage.setItem(GIVER_KEY, els.giverName.value);
+    } catch {
+      // storage blocked
+    }
+  });
+
   if (!token) {
     showNoList('Open the share link you were sent to see the list.');
     return;
   }
+
+  // The backup is a plain link: same-origin, so the owner's cookie is sent.
+  els.backup.href = apiUrl(`${listPath()}/backup`);
+
+  // "Add to Home Screen" should open this list, so the manifest names this page.
+  const manifestLink = document.createElement('link');
+  manifestLink.rel = 'manifest';
+  manifestLink.href = apiUrl('manifest', `&start=${encodeURIComponent(location.pathname)}`);
+  document.head.append(manifestLink);
 
   refresh({ full: true });
   setInterval(() => {

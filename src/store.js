@@ -6,11 +6,18 @@ const path = require('node:path');
 
 const SCHEMA_VERSION = 2;
 const MAX_SAVE_ATTEMPTS = 5;
+const HOLD_MS = 48 * 60 * 60 * 1000;
+const CATEGORIES = ['Nursery', 'Clothes', 'Feeding', 'Bath & care', 'Travel', 'Toys', 'Other'];
 
 // The registry is one document. Two places can hold it:
 //   FileBackend      a JSON file, for running locally or on a host with a disk
 //   SupabaseBackend  a Postgres row, for serverless hosts such as Vercel
 // Registry sits on top of either one and does the read-modify-write safely.
+//
+// Claims on an item come in two kinds:
+//   a bought claim   { id, by, at, name }             counts towards "bought"
+//   a hold           { id, by, at, expiresAt }        reserves one unit for 48 hours
+// `by` is a hash of the browser's device id, never the id itself.
 
 function createInitialState() {
   const now = new Date().toISOString();
@@ -51,21 +58,45 @@ function newItem(fields) {
   return { id: crypto.randomUUID(), ...fields, claims: [], createdAt: now, updatedAt: now };
 }
 
-// Only these fields ever leave the server. `mine` tells a browser whether it
-// made any of the claims on this item, so it can offer an undo.
-function publicItem(item, deviceHash = null) {
-  return {
+function confirmedClaims(item) {
+  return item.claims.filter((claim) => !claim.expiresAt);
+}
+
+function activeHolds(item, now = Date.now()) {
+  return item.claims.filter((claim) => claim.expiresAt && Date.parse(claim.expiresAt) > now);
+}
+
+// Drops holds whose time has run out, so they stop counting.
+function pruneHolds(item, now = Date.now()) {
+  item.claims = item.claims.filter((claim) => !claim.expiresAt || Date.parse(claim.expiresAt) > now);
+}
+
+// Only these fields ever leave the server. `mine` and `holding` tell a browser
+// whether it made the claim or hold on this item. `boughtBy` (names, or
+// "Anonymous") is only added for owners.
+function publicItem(item, deviceHash = null, { owner = false, now = Date.now() } = {}) {
+  const confirmed = confirmedClaims(item);
+  const holds = activeHolds(item, now);
+  const soonest = holds.map((hold) => hold.expiresAt).sort()[0] || null;
+  const out = {
     id: item.id,
     name: item.name,
     link: item.link,
     notes: item.notes,
+    category: item.category || 'Other',
+    priority: item.priority === true,
     quantity: item.quantity,
-    boughtCount: item.claims.length,
-    bought: item.claims.length >= item.quantity,
-    mine: deviceHash !== null && item.claims.some((claim) => claim.by === deviceHash),
+    boughtCount: confirmed.length,
+    bought: confirmed.length >= item.quantity,
+    reservedCount: holds.length,
+    reservedUntil: soonest,
+    mine: deviceHash !== null && confirmed.some((claim) => claim.by === deviceHash),
+    holding: deviceHash !== null && holds.some((hold) => hold.by === deviceHash),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
+  if (owner) out.boughtBy = confirmed.map((claim) => claim.name || 'Anonymous');
+  return out;
 }
 
 class FileBackend {
@@ -195,4 +226,16 @@ class Registry {
   }
 }
 
-module.exports = { Registry, FileBackend, SupabaseBackend, newItem, publicItem, migrate };
+module.exports = {
+  Registry,
+  FileBackend,
+  SupabaseBackend,
+  newItem,
+  publicItem,
+  migrate,
+  confirmedClaims,
+  activeHolds,
+  pruneHolds,
+  CATEGORIES,
+  HOLD_MS,
+};

@@ -4,7 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Harvey-Malige Baby Registry</title>
+  <meta name="theme-color" content="#b8476a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Baby Registry">
   <link rel="icon" href="data:,">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -42,6 +46,18 @@
       <label>How many do we need?
         <input name="quantity" type="number" min="1" max="20" value="1" inputmode="numeric">
       </label>
+      <label>Category
+        <select name="category">
+          <option>Nursery</option>
+          <option>Clothes</option>
+          <option>Feeding</option>
+          <option value="Bath &amp; care">Bath &amp; care</option>
+          <option>Travel</option>
+          <option>Toys</option>
+          <option selected>Other</option>
+        </select>
+      </label>
+      <label class="inline"><input type="checkbox" name="priority"> ★ Most wanted</label>
       <label>Link <span class="muted">(optional)</span>
         <input name="link" type="text" inputmode="url" autocomplete="off" placeholder="https://">
       </label>
@@ -51,16 +67,32 @@
       <button class="primary" type="submit">Add to list</button>
     </form>
 
+    <section id="giver" class="card giver-card">
+      <label for="giver-name">Your first name <span class="muted">(optional)</span></label>
+      <input id="giver-name" type="text" maxlength="40" autocomplete="given-name" placeholder="So the owners can say thank you">
+      <p class="muted small">Only the owners see names, on a thank-you list. Leave it blank to stay anonymous.</p>
+    </section>
+
+    <div id="filters" class="chips" role="group" aria-label="Filter gifts" hidden></div>
     <ul id="items" class="items" hidden></ul>
     <p id="empty" class="muted center" hidden></p>
+
+    <section id="thank-you" class="card" hidden>
+      <h2>Thank-you list 💌</h2>
+      <ul id="thank-you-list" class="thank-list"></ul>
+    </section>
   </main>
 
   <footer class="container footer">
-    <button id="owner-toggle" class="link-button" type="button">Owner sign in</button>
-    <span id="owner-tools" hidden>
+    <div class="footer-row">
+      <button id="print" class="link-button" type="button">Print list</button>
+      <button id="owner-toggle" class="link-button" type="button">Owner sign in</button>
+    </div>
+    <div id="owner-tools" class="footer-row" hidden>
       <button id="copy-link" class="link-button" type="button">Copy share link</button>
+      <a id="backup" class="link-button" download="baby-registry-backup.json">Download backup</a>
       <button id="logout" class="link-button" type="button">Sign out</button>
-    </span>
+    </div>
   </footer>
 
   <dialog id="edit-dialog">
@@ -72,6 +104,18 @@
       <label>How many do we need?
         <input name="quantity" type="number" min="1" max="20" inputmode="numeric">
       </label>
+      <label>Category
+        <select name="category">
+          <option>Nursery</option>
+          <option>Clothes</option>
+          <option>Feeding</option>
+          <option value="Bath &amp; care">Bath &amp; care</option>
+          <option>Travel</option>
+          <option>Toys</option>
+          <option>Other</option>
+        </select>
+      </label>
+      <label class="inline"><input type="checkbox" name="priority"> ★ Most wanted</label>
       <label>Link <span class="muted">(optional)</span>
         <input name="link" type="text" inputmode="url" autocomplete="off">
       </label>
