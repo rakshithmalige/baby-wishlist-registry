@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Baby Wishlist</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <h1 id="title">Baby Wishlist</h1>
+    <p id="progress" class="muted"></p>
+    <p id="status" class="muted small" aria-live="polite"></p>
+  </header>
+
+  <main class="container">
+    <section id="no-list" class="card" hidden>
+      <p>Open the share link you were sent to see the list.</p>
+    </section>
+
+    <form id="login-form" class="card" hidden>
+      <label for="passcode">Owner passcode</label>
+      <div class="row">
+        <input id="passcode" name="passcode" type="password" autocomplete="current-password" required>
+        <button class="primary" type="submit">Sign in</button>
+      </div>
+    </form>
+
+    <form id="add-form" class="card" hidden>
+      <h2>Add an item</h2>
+      <label>Name
+        <input name="name" required maxlength="120" autocomplete="off">
+      </label>
+      <label>Link <span class="muted">(optional)</span>
+        <input name="link" type="text" inputmode="url" autocomplete="off" placeholder="https://">
+      </label>
+      <label>Notes <span class="muted">(optional)</span>
+        <textarea name="notes" rows="2" maxlength="500" placeholder="Size, colour, quantity…"></textarea>
+      </label>
+      <button class="primary" type="submit">Add to list</button>
+    </form>
+
+    <ul id="items" class="items" hidden></ul>
+    <p id="empty" class="muted center" hidden></p>
+  </main>
+
+  <footer class="container footer">
+    <button id="owner-toggle" class="link-button" type="button">Owner sign in</button>
+    <span id="owner-tools" hidden>
+      <button id="copy-link" class="link-button" type="button">Copy share link</button>
+      <button id="logout" class="link-button" type="button">Sign out</button>
+    </span>
+  </footer>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form">
+      <h2>Edit item</h2>
+      <label>Name
+        <input name="name" required maxlength="120" autocomplete="off">
+      </label>
+      <label>Link <span class="muted">(optional)</span>
+        <input name="link" type="text" inputmode="url" autocomplete="off">
+      </label>
+      <label>Notes <span class="muted">(optional)</span>
+        <textarea name="notes" rows="2" maxlength="500"></textarea>
+      </label>
+      <div class="row end">
+        <button id="edit-cancel" type="button">Cancel</button>
+        <button class="primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="notice" class="notice" role="status" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

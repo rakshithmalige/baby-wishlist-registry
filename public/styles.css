@@ -1,0 +1,160 @@
+:root {
+  --bg: #fbf7f4;
+  --card: #ffffff;
+  --text: #2d2a32;
+  --muted: #6e6878;
+  --accent: #4f7cac;
+  --accent-soft: #e6eef8;
+  --done: #3f8f5b;
+  --danger: #b3261e;
+  --border: #e8e1dc;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.container { max-width: 640px; margin: 0 auto; padding: 0 16px; }
+
+.hero { text-align: center; padding: 32px 16px 12px; }
+.hero h1 { margin: 0 0 4px; font-size: 1.9rem; line-height: 1.2; overflow-wrap: anywhere; }
+
+h2 { margin: 0 0 12px; font-size: 1.1rem; }
+
+.muted { color: var(--muted); }
+.small { font-size: 0.875rem; }
+.center { text-align: center; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 0 0 16px;
+  display: grid;
+  gap: 12px;
+}
+
+label { display: block; font-weight: 600; font-size: 0.9rem; }
+label .muted { font-weight: 400; }
+label > input, label > textarea { display: block; margin-top: 4px; }
+
+input, textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 16px; /* stops iOS zooming into the field */
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+}
+textarea { resize: vertical; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.row input { flex: 1; }
+.row.end { justify-content: flex-end; }
+
+button {
+  font: inherit;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+button.danger { color: var(--danger); }
+button.link-button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  padding: 0 8px;
+}
+
+.items { list-style: none; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+
+.item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.check {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  margin: 2px 0 0;
+  accent-color: var(--done);
+  cursor: pointer;
+}
+.check:disabled { cursor: default; }
+
+.item-body { min-width: 0; flex: 1; }
+.item-name { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.item-name a { color: var(--accent); }
+.item-notes { margin: 2px 0 0; color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; white-space: pre-line; }
+
+.badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e4f3e9;
+  color: var(--done);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.item-actions { margin-top: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+.item-actions button { min-height: 36px; padding: 0 10px; font-size: 0.9rem; }
+
+.is-bought { background: #f6fbf7; }
+.is-bought .item-name { color: var(--muted); text-decoration: line-through; }
+
+.footer { text-align: center; padding: 8px 0 32px; font-size: 0.9rem; }
+
+dialog {
+  border: none;
+  border-radius: var(--radius);
+  padding: 20px;
+  width: min(480px, calc(100% - 32px));
+  color: var(--text);
+  background: var(--card);
+}
+dialog::backdrop { background: rgba(45, 42, 50, 0.45); }
+dialog form { display: grid; gap: 12px; }
+
+.notice {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  max-width: 608px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--text);
+  color: #fff;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+}
+
+@media (min-width: 640px) {
+  .hero h1 { font-size: 2.4rem; }
+}

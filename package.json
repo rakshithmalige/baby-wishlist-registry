@@ -1,0 +1,16 @@
+{
+  "name": "baby-wishlist-registry",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared baby wishlist with anonymous 'bought' ticks and live-ish updates",
+  "main": "src/index.js",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  }
+}

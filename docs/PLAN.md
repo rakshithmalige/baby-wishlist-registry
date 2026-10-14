@@ -140,5 +140,5 @@ Every non-GET request must send `Content-Type: application/json`. This blocks cr
 
 _Filled in at the end of each sprint: what shipped, what changed, what to fix next._
 
-- **Sprint 1:** _pending_
+- **Sprint 1 (done):** Shipped US-1 to US-9. 16 API tests pass. Browser check at 375px: sign-in, add/edit/delete, guest tick, 409 on a double tick, owner untick, updates reaching other open pages within the 10-second poll, no horizontal scroll. Review: nothing blocking. Retro: the next most likely ask is "I ticked the wrong one", so undo comes first in Sprint 2.
 - **Sprint 2:** _pending_
