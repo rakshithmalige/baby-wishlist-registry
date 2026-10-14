@@ -24,7 +24,7 @@ async function createServer(env = process.env) {
   const listener = createApp({
     store,
     passcode,
-    title: env.LIST_TITLE || 'Baby Registry',
+    title: env.LIST_TITLE || 'Harvey-Malige Baby Registry',
     // VERCEL is set on Vercel, where every request is HTTPS and behind its proxy.
     cookieSecure: Boolean(env.VERCEL) || (env.PUBLIC_URL || '').startsWith('https://'),
     trustProxy: Boolean(env.VERCEL) || env.TRUST_PROXY === 'true',

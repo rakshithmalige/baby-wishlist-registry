@@ -10,7 +10,7 @@ createServer(process.env)
   .then(async ({ listener, store }) => {
     const { list } = await store.read();
     http.createServer(listener).listen(port, () => {
-      console.log(`${process.env.LIST_TITLE || 'Baby Registry'} running on port ${port}`);
+      console.log(`${process.env.LIST_TITLE || 'Harvey-Malige Baby Registry'} running on port ${port}`);
       console.log(`Share link: ${publicUrl}/l/${list.shareToken}`);
     });
   })

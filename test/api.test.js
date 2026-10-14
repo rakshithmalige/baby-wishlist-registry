@@ -111,7 +111,7 @@ test('the list page is served with security headers and no-cache', async () => {
   assert.match(res.headers.get('content-security-policy'), /script-src 'self'/);
   assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(res.headers.get('x-frame-options'), 'DENY');
-  assert.match(res.text, /<title>Baby Registry<\/title>/);
+  assert.match(res.text, /<title>Harvey-Malige Baby Registry<\/title>/);
 });
 
 test('owner sign-in rejects a wrong passcode and issues a session cookie', async () => {

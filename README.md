@@ -1,4 +1,4 @@
-# Baby Registry
+# Harvey-Malige Baby Registry
 
 One shared wishlist, maintained by the owners and shared with family and friends by a link.
 
@@ -28,7 +28,7 @@ Open the share link printed in the terminal, for example `http://localhost:3000/
 | `SUPABASE_URL` | for Vercel | — | Supabase project URL. When set, the list is stored in Supabase instead of a file. |
 | `SUPABASE_ANON_KEY` | with `SUPABASE_URL` | — | Supabase public anon key. Access still needs `REGISTRY_SECRET`. |
 | `REGISTRY_SECRET` | with `SUPABASE_URL` | — | Random key the server sends to Supabase. Stored only as a hash in the database. Keep it secret. |
-| `LIST_TITLE` | no | `Baby Registry` | Heading shown on the list. |
+| `LIST_TITLE` | no | `Harvey-Malige Baby Registry` | Heading shown on the list. |
 | `PORT` | no | `3000` | HTTP port (local server only). |
 | `DATA_FILE` | no | `data/registry.json` | Where the list is saved when `SUPABASE_URL` is not set. |
 | `PUBLIC_URL` | no | `http://localhost:PORT` | Base URL printed in the share link. Use `https://…` in production, which also turns on secure cookies. |

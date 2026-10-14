@@ -72,7 +72,7 @@ function sha256Hex(value) {
 function createApp({
   store,
   passcode,
-  title = 'Baby Registry',
+  title = 'Harvey-Malige Baby Registry',
   cookieSecure = false,
   trustProxy = false,
   limits = {},
