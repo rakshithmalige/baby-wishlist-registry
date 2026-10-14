@@ -2,6 +2,7 @@
   'use strict';
 
   const POLL_MS = 10000;
+  const DEVICE_KEY = 'wishlist-device-id';
   const tokenMatch = location.pathname.match(/^\/l\/([A-Za-z0-9_-]+)\/?$/);
   const token = tokenMatch ? tokenMatch[1] : null;
   const $ = (id) => document.getElementById(id);
@@ -32,12 +33,37 @@
   let editingId = null;
   let noticeTimer = null;
 
+  // ---- device id -----------------------------------------------------------
+  // A random id kept in this browser. The server stores only a hash of it, so
+  // this browser can undo its own ticks without anyone being identified.
+
+  function randomId() {
+    const bytes = crypto.getRandomValues(new Uint8Array(18));
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function loadDeviceId() {
+    try {
+      const saved = localStorage.getItem(DEVICE_KEY);
+      if (saved && /^[A-Za-z0-9_-]{16,100}$/.test(saved)) return saved;
+      const fresh = randomId();
+      localStorage.setItem(DEVICE_KEY, fresh);
+      return fresh;
+    } catch {
+      return randomId(); // storage blocked: undo works until this page closes
+    }
+  }
+
+  const deviceId = loadDeviceId();
+
   // ---- networking ----------------------------------------------------------
 
   async function api(method, url, body) {
+    const headers = { 'X-Device-Id': deviceId };
+    if (method !== 'GET') headers['Content-Type'] = 'application/json';
     const res = await fetch(url, {
       method,
-      headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'same-origin',
       cache: 'no-store',
@@ -108,14 +134,25 @@
     const li = document.createElement('li');
     li.className = item.bought ? 'item is-bought' : 'item';
 
-    const check = document.createElement('input');
-    check.type = 'checkbox';
-    check.className = 'check';
-    check.checked = item.bought;
-    // Guests can tick but not untick. Owners can do both.
-    check.disabled = item.bought && !owner;
-    check.setAttribute('aria-label', `${item.bought ? 'Bought' : 'Mark as bought'}: ${item.name}`);
-    check.addEventListener('change', () => toggleBought(item, check.checked));
+    // Owners can undo anything. Guests can undo only what their own browser ticked.
+    const canUndo = owner || item.mine;
+    const multi = item.quantity > 1;
+
+    let marker;
+    if (multi) {
+      marker = document.createElement('span');
+      marker.className = 'count';
+      marker.textContent = `${item.boughtCount}/${item.quantity}`;
+      marker.setAttribute('aria-hidden', 'true');
+    } else {
+      marker = document.createElement('input');
+      marker.type = 'checkbox';
+      marker.className = 'check';
+      marker.checked = item.bought;
+      marker.disabled = item.bought && !canUndo;
+      marker.setAttribute('aria-label', `${item.bought ? 'Bought' : 'Mark as bought'}: ${item.name}`);
+      marker.addEventListener('change', () => (marker.checked ? claim(item) : unclaim(item)));
+    }
 
     const body = document.createElement('div');
     body.className = 'item-body';
@@ -141,32 +178,43 @@
       body.append(notes);
     }
 
+    if (multi) {
+      const row = document.createElement('div');
+      row.className = 'qty-row';
+      const text = document.createElement('span');
+      text.textContent = `${item.boughtCount} of ${item.quantity} bought`;
+      row.append(
+        text,
+        actionButton('I bought one', () => claim(item), 'primary', item.bought),
+        actionButton('Undo', () => unclaim(item), '', !canUndo || item.boughtCount === 0),
+      );
+      body.append(row);
+    }
+
     if (item.bought) {
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = 'Bought';
+      badge.textContent = multi ? 'All bought' : 'Bought';
       body.append(badge);
     }
 
     if (owner) {
       const actions = document.createElement('div');
       actions.className = 'item-actions';
-      actions.append(
-        actionButton('Edit', () => openEdit(item)),
-        actionButton('Delete', () => removeItem(item), 'danger'),
-      );
+      actions.append(actionButton('Edit', () => openEdit(item)), actionButton('Delete', () => removeItem(item), 'danger'));
       body.append(actions);
     }
 
-    li.append(check, body);
+    li.append(marker, body);
     return li;
   }
 
-  function actionButton(label, onClick, className = '') {
+  function actionButton(label, onClick, className = '', disabled = false) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;
     if (className) button.className = className;
+    button.disabled = disabled;
     button.addEventListener('click', onClick);
     return button;
   }
@@ -197,10 +245,20 @@
 
   // ---- actions -------------------------------------------------------------
 
-  async function toggleBought(item, checked) {
+  async function claim(item) {
     try {
-      await api(checked ? 'POST' : 'DELETE', `${itemUrl(item.id)}/bought`);
-      notify(checked ? `Thank you! "${item.name}" is marked as bought.` : `"${item.name}" is back on the list.`);
+      await api('POST', `${itemUrl(item.id)}/bought`);
+      notify(`Thank you! "${item.name}" is marked as bought.`);
+    } catch (err) {
+      notify(err.message);
+    }
+    await refresh({ full: true });
+  }
+
+  async function unclaim(item) {
+    try {
+      await api('DELETE', `${itemUrl(item.id)}/bought`);
+      notify(`Undone for "${item.name}".`);
     } catch (err) {
       notify(err.message);
     }
@@ -222,6 +280,7 @@
     editingId = item.id;
     const { elements } = els.editForm;
     elements.name.value = item.name;
+    elements.quantity.value = item.quantity;
     elements.link.value = item.link || '';
     elements.notes.value = item.notes || '';
     els.editDialog.showModal();
@@ -230,7 +289,12 @@
 
   function readItemForm(form) {
     const { elements } = form;
-    return { name: elements.name.value, link: elements.link.value, notes: elements.notes.value };
+    return {
+      name: elements.name.value,
+      quantity: elements.quantity.value,
+      link: elements.link.value,
+      notes: elements.notes.value,
+    };
   }
 
   // ---- owner session -------------------------------------------------------

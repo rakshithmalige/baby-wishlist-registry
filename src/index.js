@@ -21,6 +21,9 @@ const server = createApp({
   passcode,
   title,
   cookieSecure: publicUrl.startsWith('https://'),
+  // Behind a reverse proxy every request arrives from the proxy's address, so
+  // rate limits must read the client address from X-Forwarded-For instead.
+  trustProxy: process.env.TRUST_PROXY === 'true',
 });
 
 server.listen(port, () => {

@@ -10,6 +10,13 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const SESSION_COOKIE = 'owner_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_QUANTITY = 20;
+const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
+
+const DEFAULT_LIMITS = {
+  loginAttempts: { max: 10, windowMs: 15 * 60 * 1000 },
+  ticks: { max: 60, windowMs: 60 * 1000 },
+};
 
 const STATIC_FILES = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
@@ -28,14 +35,47 @@ const SECURITY_HEADERS = {
 };
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra = {}) {
     super(message);
     this.status = status;
+    Object.assign(this, extra);
   }
 }
 
-function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = false }) {
+// Fixed-window counter per key (IP address). Old windows are pruned as we go.
+function createRateLimiter({ max, windowMs }) {
+  const windows = new Map(); // key -> { count, resetAt }
+  return (key) => {
+    const now = Date.now();
+    if (windows.size > 10000) {
+      for (const [k, w] of windows) if (w.resetAt <= now) windows.delete(k);
+    }
+    let entry = windows.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      windows.set(key, entry);
+    }
+    entry.count += 1;
+    if (entry.count <= max) return { ok: true };
+    return { ok: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
+  };
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function createApp({
+  store,
+  passcode,
+  title = 'Baby Wishlist',
+  cookieSecure = false,
+  trustProxy = false,
+  limits = {},
+}) {
   const sessions = new Map(); // session id -> expiry timestamp
+  const limitLogin = createRateLimiter({ ...DEFAULT_LIMITS.loginAttempts, ...limits.loginAttempts });
+  const limitTicks = createRateLimiter({ ...DEFAULT_LIMITS.ticks, ...limits.ticks });
 
   // ---- helpers -----------------------------------------------------------
 
@@ -65,24 +105,58 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
 
   // Constant-time comparison of two strings of any length.
   function safeEqual(a, b) {
-    const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
-    return crypto.timingSafeEqual(digest(a), digest(b));
+    return crypto.timingSafeEqual(Buffer.from(sha256Hex(String(a))), Buffer.from(sha256Hex(String(b))));
+  }
+
+  function clientIp(req) {
+    if (trustProxy) {
+      const forwarded = req.headers['x-forwarded-for'];
+      if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+    }
+    return req.socket.remoteAddress || 'unknown';
+  }
+
+  function enforce(limiter, req) {
+    const result = limiter(clientIp(req));
+    if (!result.ok) {
+      throw new HttpError(429, 'Too many requests. Please wait a moment and try again.', {
+        retryAfter: result.retryAfter,
+      });
+    }
   }
 
   function requireList(token) {
     if (!safeEqual(token, store.shareToken)) throw new HttpError(404, 'This list link is not valid');
   }
 
-  function isOwner(req) {
+  function sessionIdFrom(req) {
     const match = (req.headers.cookie || '').match(/(?:^|;\s*)owner_session=([A-Za-z0-9_-]+)/);
-    const expiresAt = match && sessions.get(match[1]);
+    return match ? match[1] : null;
+  }
+
+  function isOwner(req) {
+    const id = sessionIdFrom(req);
+    const expiresAt = id && sessions.get(id);
     if (expiresAt && expiresAt > Date.now()) return true;
-    if (match) sessions.delete(match[1]);
+    if (id) sessions.delete(id);
     return false;
   }
 
   function requireOwner(req) {
     if (!isOwner(req)) throw new HttpError(401, 'Owner sign-in required');
+  }
+
+  // Returns a hash of the browser's device id, or null if none was sent.
+  // The raw id never leaves the browser and is never stored.
+  function deviceHashFrom(req) {
+    const id = req.headers['x-device-id'];
+    return typeof id === 'string' && DEVICE_ID_PATTERN.test(id) ? sha256Hex(id) : null;
+  }
+
+  function requireDevice(req) {
+    const device = deviceHashFrom(req);
+    if (!device) throw new HttpError(400, 'Missing device id');
+    return device;
   }
 
   function findItem(id) {
@@ -122,6 +196,15 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
     return url.href;
   }
 
+  function cleanQuantity(value) {
+    if (value === undefined || value === null || value === '') return 1;
+    const n = typeof value === 'string' ? Number(value) : value;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_QUANTITY) {
+      throw new HttpError(400, `Quantity must be a whole number from 1 to ${MAX_QUANTITY}`);
+    }
+    return n;
+  }
+
   // Full item input for create; only the fields present for partial (edit).
   function cleanItemInput(input, { partial = false } = {}) {
     const fields = {};
@@ -132,6 +215,7 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
     }
     if (!partial || 'link' in input) fields.link = cleanLink(input.link);
     if (!partial || 'notes' in input) fields.notes = cleanText(input.notes, 500, 'Notes');
+    if (!partial || 'quantity' in input) fields.quantity = cleanQuantity(input.quantity);
     return fields;
   }
 
@@ -160,14 +244,16 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
   function getList({ req, params, url }) {
     requireList(params[0]);
     const owner = isOwner(req);
+    const device = deviceHashFrom(req);
     const version = url.searchParams.get('version');
     if (version !== null && Number(version) === store.state.version) {
       return { body: { version: store.state.version, unchanged: true, owner } };
     }
-    return { body: { title, ...store.snapshot(), owner } };
+    return { body: { title, ...store.snapshot(device), owner } };
   }
 
-  function login({ body }) {
+  function login({ req, body }) {
+    enforce(limitLogin, req);
     const supplied = typeof body.passcode === 'string' ? body.passcode : '';
     if (!safeEqual(supplied, passcode)) throw new HttpError(401, 'Wrong passcode');
 
@@ -183,8 +269,8 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
   }
 
   function logout({ req }) {
-    const match = (req.headers.cookie || '').match(/(?:^|;\s*)owner_session=([A-Za-z0-9_-]+)/);
-    if (match) sessions.delete(match[1]);
+    const id = sessionIdFrom(req);
+    if (id) sessions.delete(id);
     return { body: { ok: true }, headers: { 'Set-Cookie': sessionCookie('', 0) } };
   }
 
@@ -192,7 +278,7 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
     requireList(params[0]);
     requireOwner(req);
     const item = store.addItem(cleanItemInput(body));
-    return { status: 201, body: { item: publicItem(item) } };
+    return { status: 201, body: { item: publicItem(item, deviceHashFrom(req)) } };
   }
 
   function editItem({ req, params, body }) {
@@ -201,8 +287,11 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
     const item = findItem(params[1]);
     const fields = cleanItemInput(body, { partial: true });
     if (Object.keys(fields).length === 0) throw new HttpError(400, 'Nothing to change');
+    if (fields.quantity !== undefined && fields.quantity < item.claims.length) {
+      throw new HttpError(400, `Quantity cannot be lower than the ${item.claims.length} already bought`);
+    }
     store.updateItem(item, fields);
-    return { body: { item: publicItem(item) } };
+    return { body: { item: publicItem(item, deviceHashFrom(req)) } };
   }
 
   function deleteItem({ req, params }) {
@@ -212,24 +301,39 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
     return { body: { ok: true } };
   }
 
-  function markBought({ params }) {
+  // Anyone with the link can claim one of an item (guests and owners alike).
+  function markBought({ req, params }) {
     requireList(params[0]);
+    enforce(limitTicks, req);
+    const device = requireDevice(req);
     const item = findItem(params[1]);
-    if (item.bought) {
-      throw Object.assign(new HttpError(409, 'Someone already marked this one as bought'), {
-        item: publicItem(item),
-      });
+    if (item.claims.length >= item.quantity) {
+      const message =
+        item.quantity === 1 ? 'Someone already marked this one as bought' : 'All of these have already been bought';
+      throw new HttpError(409, message, { item: publicItem(item, device) });
     }
-    store.updateItem(item, { bought: true, boughtAt: new Date().toISOString() });
-    return { body: { item: publicItem(item) } };
+    const claim = { id: crypto.randomUUID(), by: device, at: new Date().toISOString() };
+    store.updateItem(item, { claims: [...item.claims, claim] });
+    return { body: { item: publicItem(item, device) } };
   }
 
+  // Owners can undo the latest claim on an item. Guests can undo only the
+  // latest claim made from their own browser.
   function unmarkBought({ req, params }) {
     requireList(params[0]);
-    requireOwner(req);
+    enforce(limitTicks, req);
+    const owner = isOwner(req);
+    const device = deviceHashFrom(req);
     const item = findItem(params[1]);
-    store.updateItem(item, { bought: false, boughtAt: null });
-    return { body: { item: publicItem(item) } };
+
+    const undoable = owner ? item.claims : item.claims.filter((claim) => device && claim.by === device);
+    if (undoable.length === 0) {
+      if (owner) throw new HttpError(409, 'Nothing to undo on this item');
+      throw new HttpError(403, 'Only the browser that ticked this can undo it');
+    }
+    const latest = undoable[undoable.length - 1];
+    store.updateItem(item, { claims: item.claims.filter((claim) => claim.id !== latest.id) });
+    return { body: { item: publicItem(item, device) } };
   }
 
   const ROUTES = [
@@ -274,8 +378,9 @@ function createApp({ store, passcode, title = 'Baby Wishlist', cookieSecure = fa
   return http.createServer((req, res) => {
     handle(req, res).catch((err) => {
       if (err instanceof HttpError) {
-        const { item } = err;
-        return sendJson(res, err.status, { error: err.message, ...(item && { item }) });
+        const { item, retryAfter } = err;
+        const headers = retryAfter ? { 'Retry-After': String(retryAfter) } : {};
+        return sendJson(res, err.status, { error: err.message, ...(item && { item }) }, headers);
       }
       console.error(err);
       sendJson(res, 500, { error: 'Something went wrong' });

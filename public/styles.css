@@ -74,6 +74,7 @@ button {
   cursor: pointer;
 }
 button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+button:disabled { opacity: 0.45; cursor: default; }
 button.danger { color: var(--danger); }
 button.link-button {
   border: none;
@@ -120,6 +121,31 @@ button.link-button {
   font-size: 0.8rem;
   font-weight: 600;
 }
+
+.count {
+  flex: 0 0 auto;
+  min-width: 44px;
+  padding: 2px 8px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.qty-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.qty-row > span:first-child { flex: 1 0 100%; }
+.qty-row button { min-height: 36px; padding: 0 12px; font-size: 0.9rem; }
 
 .item-actions { margin-top: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
 .item-actions button { min-height: 36px; padding: 0 10px; font-size: 0.9rem; }

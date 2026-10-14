@@ -9,6 +9,9 @@ const { createApp } = require('../src/app');
 const { Store } = require('../src/store');
 
 const PASSCODE = 'correct horse battery';
+const DEVICE_A = 'device-a-0123456789abcdef';
+const DEVICE_B = 'device-b-0123456789abcdef';
+const DEVICE_C = 'device-c-0123456789abcdef';
 
 let tmpDir;
 let dataFile;
@@ -17,28 +20,49 @@ let server;
 let base;
 let ownerCookie;
 
-async function call(method, pathname, { body, cookie, headers = {} } = {}) {
+// Sends a request. Non-GET requests are sent as JSON unless a content type is given.
+async function request(origin, method, pathname, { body, cookie, headers = {} } = {}) {
   const init = { method, headers: { ...headers } };
   if (cookie) init.headers.Cookie = cookie;
   if (method !== 'GET' && !init.headers['Content-Type']) init.headers['Content-Type'] = 'application/json';
   if (body !== undefined) init.body = typeof body === 'string' ? body : JSON.stringify(body);
-  const res = await fetch(base + pathname, init);
+  const res = await fetch(origin + pathname, init);
   const text = await res.text();
   let data = null;
   try {
     data = JSON.parse(text);
   } catch {
-    // not JSON (HTML page)
+    // not JSON (the HTML page)
   }
   return { status: res.status, data, text, headers: res.headers };
 }
 
+const call = (method, pathname, options) => request(base, method, pathname, options);
 const listPath = () => `/api/lists/${store.shareToken}`;
+const device = (id) => ({ 'X-Device-Id': id });
 
 async function addItem(fields, cookie = ownerCookie) {
   const res = await call('POST', `${listPath()}/items`, { body: fields, cookie });
   assert.equal(res.status, 201, res.text);
   return res.data.item;
+}
+
+function tick(itemId, deviceId) {
+  return call('POST', `${listPath()}/items/${itemId}/bought`, { headers: device(deviceId) });
+}
+
+function undo(itemId, { deviceId, cookie } = {}) {
+  return call('DELETE', `${listPath()}/items/${itemId}/bought`, {
+    headers: deviceId ? device(deviceId) : {},
+    cookie,
+  });
+}
+
+async function startApp(options) {
+  const app = createApp(options);
+  await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${app.address().port}`;
+  return { app, origin, close: () => new Promise((resolve) => app.close(resolve)) };
 }
 
 before(async () => {
@@ -54,6 +78,8 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+// ---- Sprint 1: MVP --------------------------------------------------------
 
 test('the list is only reachable with its share token', async () => {
   const wrong = await call('GET', '/api/lists/not-the-token');
@@ -108,8 +134,10 @@ test('owner adds an item; name is required and trimmed', async () => {
   const item = await addItem({ name: '  Muslin swaddles  ', notes: 'Grey or white', link: 'example.com/swaddles' });
   assert.equal(item.name, 'Muslin swaddles');
   assert.equal(item.link, 'https://example.com/swaddles');
+  assert.equal(item.quantity, 1);
   assert.equal(item.bought, false);
-  assert.equal(item.boughtAt, null);
+  assert.equal(item.boughtCount, 0);
+  assert.equal(item.mine, false);
 });
 
 test('links must be http or https', async () => {
@@ -144,29 +172,34 @@ test('owner edits an item; partial edits keep other fields', async () => {
 test('guests tick an item anonymously; a second tick is refused', async () => {
   const item = await addItem({ name: 'Pram' });
 
-  const first = await call('POST', `${listPath()}/items/${item.id}/bought`);
+  const first = await tick(item.id, DEVICE_A);
   assert.equal(first.status, 200);
   assert.equal(first.data.item.bought, true);
-  assert.ok(first.data.item.boughtAt);
-  assert.equal('buyer' in first.data.item, false);
+  assert.equal(first.data.item.boughtCount, 1);
+  assert.equal(JSON.stringify(first.data).includes(DEVICE_A), false, 'device id must never be returned');
+  assert.equal('by' in first.data.item, false);
+  assert.equal('claims' in first.data.item, false);
 
-  const second = await call('POST', `${listPath()}/items/${item.id}/bought`);
+  const second = await tick(item.id, DEVICE_B);
   assert.equal(second.status, 409);
   assert.match(second.data.error, /already marked/);
   assert.equal(second.data.item.bought, true);
 });
 
-test('only owners can untick an item', async () => {
+test('only owners, or the browser that ticked, can untick', async () => {
   const item = await addItem({ name: 'Cot' });
-  await call('POST', `${listPath()}/items/${item.id}/bought`);
+  await tick(item.id, DEVICE_A);
 
-  const guest = await call('DELETE', `${listPath()}/items/${item.id}/bought`);
-  assert.equal(guest.status, 401);
+  const stranger = await undo(item.id, { deviceId: DEVICE_B });
+  assert.equal(stranger.status, 403);
 
-  const owner = await call('DELETE', `${listPath()}/items/${item.id}/bought`, { cookie: ownerCookie });
+  const anonymous = await undo(item.id);
+  assert.equal(anonymous.status, 403, 'a guest with no device id has nothing to undo');
+
+  const owner = await undo(item.id, { cookie: ownerCookie });
   assert.equal(owner.status, 200);
   assert.equal(owner.data.item.bought, false);
-  assert.equal(owner.data.item.boughtAt, null);
+  assert.equal(owner.data.item.boughtCount, 0);
 });
 
 test('owner deletes an item', async () => {
@@ -183,7 +216,7 @@ test('version lets pollers skip unchanged data', async () => {
   const same = await call('GET', `${listPath()}?version=${before.data.version}`);
   assert.equal(same.data.unchanged, true);
 
-  await call('POST', `${listPath()}/items/${before.data.items[0].id}/bought`);
+  await tick(before.data.items[0].id, DEVICE_C);
   const after = await call('GET', `${listPath()}?version=${before.data.version}`);
   assert.equal(after.data.unchanged, undefined);
   assert.equal(after.data.version, before.data.version + 1);
@@ -191,7 +224,7 @@ test('version lets pollers skip unchanged data', async () => {
 
 test('mutations must be sent as JSON', async () => {
   const res = await call('POST', `${listPath()}/items/whatever/bought`, {
-    headers: { 'Content-Type': 'text/plain' },
+    headers: { 'Content-Type': 'text/plain', ...device(DEVICE_A) },
   });
   assert.equal(res.status, 415);
 });
@@ -209,12 +242,113 @@ test('user text is returned as plain data, never as markup', async () => {
   assert.equal(item.name, '<img src=x onerror=alert(1)>');
 });
 
-test('logout ends the owner session', async () => {
-  const out = await call('POST', '/api/owner/logout', { cookie: ownerCookie });
-  assert.equal(out.status, 200);
+// ---- Sprint 2: undo, quantities, rate limits ------------------------------
 
-  const add = await call('POST', `${listPath()}/items`, { body: { name: 'After logout' }, cookie: ownerCookie });
-  assert.equal(add.status, 401);
+test('a browser sees which items it ticked, so it can offer an undo', async () => {
+  const item = await addItem({ name: 'Bibs' });
+  await tick(item.id, DEVICE_A);
+
+  const mine = await call('GET', listPath(), { headers: device(DEVICE_A) });
+  assert.equal(mine.data.items.find((i) => i.id === item.id).mine, true);
+
+  const other = await call('GET', listPath(), { headers: device(DEVICE_B) });
+  assert.equal(other.data.items.find((i) => i.id === item.id).mine, false);
+});
+
+test('a guest can undo their own tick and nobody else can', async () => {
+  const item = await addItem({ name: 'Blanket' });
+  await tick(item.id, DEVICE_A);
+
+  const other = await undo(item.id, { deviceId: DEVICE_B });
+  assert.equal(other.status, 403);
+  assert.match(other.data.error, /ticked this can undo/);
+
+  const own = await undo(item.id, { deviceId: DEVICE_A });
+  assert.equal(own.status, 200);
+  assert.equal(own.data.item.bought, false);
+
+  const nothingLeft = await undo(item.id, { deviceId: DEVICE_A });
+  assert.equal(nothingLeft.status, 403);
+});
+
+test('ticks require a device id', async () => {
+  const item = await addItem({ name: 'Rattle' });
+  const res = await call('POST', `${listPath()}/items/${item.id}/bought`);
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /device/);
+});
+
+test('quantity: an item is bought only once every unit is claimed', async () => {
+  const item = await addItem({ name: 'Bodysuits', quantity: 3 });
+  assert.equal(item.quantity, 3);
+
+  const one = await tick(item.id, DEVICE_A);
+  assert.equal(one.data.item.bought, false);
+  assert.equal(one.data.item.boughtCount, 1);
+
+  await tick(item.id, DEVICE_B);
+  const three = await tick(item.id, DEVICE_C);
+  assert.equal(three.data.item.bought, true);
+  assert.equal(three.data.item.boughtCount, 3);
+
+  const four = await tick(item.id, 'device-d-0123456789abcdef');
+  assert.equal(four.status, 409);
+  assert.match(four.data.error, /All of these have already been bought/);
+});
+
+test('quantity is validated: whole numbers from 1 to 20', async () => {
+  for (const quantity of [0, 21, 1.5, 'lots', true]) {
+    const res = await call('POST', `${listPath()}/items`, {
+      body: { name: 'Bad quantity', quantity },
+      cookie: ownerCookie,
+    });
+    assert.equal(res.status, 400, `quantity ${JSON.stringify(quantity)} should be rejected`);
+    assert.match(res.data.error, /Quantity must be a whole number/);
+  }
+
+  const asText = await addItem({ name: 'Text quantity', quantity: '4' });
+  assert.equal(asText.quantity, 4);
+});
+
+test('owner cannot lower quantity below the number already bought', async () => {
+  const item = await addItem({ name: 'Socks', quantity: 4 });
+  await tick(item.id, DEVICE_A);
+  await tick(item.id, DEVICE_B);
+
+  const tooLow = await call('PATCH', `${listPath()}/items/${item.id}`, {
+    body: { quantity: 1 },
+    cookie: ownerCookie,
+  });
+  assert.equal(tooLow.status, 400);
+  assert.match(tooLow.data.error, /already bought/);
+
+  const exact = await call('PATCH', `${listPath()}/items/${item.id}`, {
+    body: { quantity: 2 },
+    cookie: ownerCookie,
+  });
+  assert.equal(exact.status, 200);
+  assert.equal(exact.data.item.bought, true);
+});
+
+test('owner undo removes the most recent claim, whichever browser made it', async () => {
+  const item = await addItem({ name: 'Towels', quantity: 2 });
+  await tick(item.id, DEVICE_A);
+  await tick(item.id, DEVICE_B);
+
+  const res = await undo(item.id, { cookie: ownerCookie });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.item.boughtCount, 1);
+
+  // DEVICE_A's claim is the older one, so it survives the owner's undo.
+  const stillMine = await call('GET', listPath(), { headers: device(DEVICE_A) });
+  assert.equal(stillMine.data.items.find((i) => i.id === item.id).mine, true);
+});
+
+test('owner undo on an item with nothing bought is a clear error', async () => {
+  const item = await addItem({ name: 'Untouched' });
+  const res = await undo(item.id, { cookie: ownerCookie });
+  assert.equal(res.status, 409);
+  assert.match(res.data.error, /Nothing to undo/);
 });
 
 test('data is written to disk and survives a restart', async () => {
@@ -223,4 +357,115 @@ test('data is written to disk and survives a restart', async () => {
   assert.equal(fresh.state.items.length, store.state.items.length);
   assert.ok(fresh.state.items.some((item) => item.name === 'Glass bottle'));
   assert.ok(!fs.existsSync(`${dataFile}.tmp`));
+});
+
+test('schema 1 data (bought flags) migrates to quantity and claims', () => {
+  const legacyFile = path.join(tmpDir, 'legacy.json');
+  const now = '2026-10-01T00:00:00.000Z';
+  fs.writeFileSync(
+    legacyFile,
+    JSON.stringify({
+      version: 5,
+      updatedAt: now,
+      list: { shareToken: 'legacy-token-0123456789', createdAt: now },
+      items: [
+        { id: 'a', name: 'Cot', link: '', notes: '', bought: true, boughtAt: now, createdAt: now, updatedAt: now },
+        { id: 'b', name: 'Pram', link: '', notes: '', bought: false, boughtAt: null, createdAt: now, updatedAt: now },
+      ],
+    }),
+  );
+
+  const migrated = new Store(legacyFile);
+  const [cot, pram] = migrated.state.items;
+
+  assert.equal(migrated.state.schemaVersion, 2);
+  assert.equal(cot.quantity, 1);
+  assert.equal(cot.claims.length, 1);
+  assert.equal(cot.claims[0].by, null, 'legacy ticks have no browser to undo from');
+  assert.equal('bought' in cot, false);
+  assert.equal('boughtAt' in cot, false);
+  assert.deepEqual(pram.claims, []);
+
+  const onDisk = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+  assert.equal(onDisk.schemaVersion, 2);
+  assert.equal(onDisk.items[0].claims.length, 1);
+});
+
+test('the sign-in endpoint is rate limited per IP', async () => {
+  const limited = await startApp({
+    store: new Store(path.join(tmpDir, 'limit-login.json')),
+    passcode: PASSCODE,
+    limits: { loginAttempts: { max: 3, windowMs: 60_000 } },
+  });
+  try {
+    const attempt = () => request(limited.origin, 'POST', '/api/owner/login', { body: { passcode: 'nope' } });
+    for (let i = 0; i < 3; i += 1) assert.equal((await attempt()).status, 401);
+
+    const blocked = await attempt();
+    assert.equal(blocked.status, 429);
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+  } finally {
+    await limited.close();
+  }
+});
+
+test('ticks are rate limited per IP', async () => {
+  const limitedStore = new Store(path.join(tmpDir, 'limit-ticks.json'));
+  const limited = await startApp({
+    store: limitedStore,
+    passcode: PASSCODE,
+    limits: { ticks: { max: 2, windowMs: 60_000 } },
+  });
+  try {
+    const login = await request(limited.origin, 'POST', '/api/owner/login', { body: { passcode: PASSCODE } });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const token = limitedStore.shareToken;
+
+    const add = await request(limited.origin, 'POST', `/api/lists/${token}/items`, {
+      body: { name: 'Many', quantity: 10 },
+      cookie,
+    });
+    const claim = (deviceId) =>
+      request(limited.origin, 'POST', `/api/lists/${token}/items/${add.data.item.id}/bought`, {
+        headers: device(deviceId),
+      });
+
+    assert.equal((await claim(DEVICE_A)).status, 200);
+    assert.equal((await claim(DEVICE_B)).status, 200);
+    const third = await claim(DEVICE_C);
+    assert.equal(third.status, 429);
+    assert.ok(third.headers.get('retry-after'));
+  } finally {
+    await limited.close();
+  }
+});
+
+test('behind a proxy, rate limits follow X-Forwarded-For', async () => {
+  const proxied = await startApp({
+    store: new Store(path.join(tmpDir, 'proxied.json')),
+    passcode: PASSCODE,
+    trustProxy: true,
+    limits: { loginAttempts: { max: 2, windowMs: 60_000 } },
+  });
+  try {
+    const attempt = (ip) =>
+      request(proxied.origin, 'POST', '/api/owner/login', {
+        body: { passcode: 'nope' },
+        headers: { 'X-Forwarded-For': ip },
+      });
+    assert.equal((await attempt('10.0.0.1')).status, 401);
+    assert.equal((await attempt('10.0.0.1')).status, 401);
+    assert.equal((await attempt('10.0.0.1')).status, 429);
+    assert.equal((await attempt('10.0.0.2')).status, 401, 'a different client is not blocked');
+  } finally {
+    await proxied.close();
+  }
+});
+
+test('logout ends the owner session', async () => {
+  const out = await call('POST', '/api/owner/logout', { cookie: ownerCookie });
+  assert.equal(out.status, 200);
+
+  const add = await call('POST', `${listPath()}/items`, { body: { name: 'After logout' }, cookie: ownerCookie });
+  assert.equal(add.status, 401);
 });
