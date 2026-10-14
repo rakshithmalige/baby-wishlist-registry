@@ -98,7 +98,7 @@
       if (seq !== requestSeq) return;
       if (err.status === 404) {
         stopped = true;
-        showNoList('This list link is not valid. Check the link you were sent.');
+        showNoList('This list link is not valid. Check the link you were sent.', `Server replied ${err.status}: ${err.message}`);
         return;
       }
       online = false;
@@ -226,8 +226,10 @@
       : 'Connection lost. Retrying…';
   }
 
-  function showNoList(message) {
+  function showNoList(message, detail = '') {
     els.noList.querySelector('p').textContent = message;
+    els.noList.querySelector('#no-list-detail').textContent = detail;
+    els.noList.querySelector('#no-list-detail').hidden = !detail;
     els.noList.hidden = false;
     els.progress.hidden = true;
     els.status.hidden = true;
