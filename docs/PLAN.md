@@ -1,4 +1,4 @@
-# Baby Wishlist & Registry: Product Plan
+# Baby Registry: Product Plan
 
 ## 1. Goal
 
@@ -60,10 +60,14 @@ One shared wishlist for the baby, maintained by Maia and me, shared with family 
 ```
 Browser (vanilla JS, polls every 10s)
    │  HTTPS
-Node 22 server (node:http, zero dependencies)
-   ├─ static files: index.html, app.js, styles.css
-   ├─ JSON API under /api
-   └─ data/registry.json (atomic writes, persistent volume in Docker)
+Vercel
+   ├─ static files: public/ (index.html, app.js, styles.css)
+   ├─ /api/* : one Node 22 function (zero npm dependencies)
+   └─ daily cron → /api/health (keeps the database awake)
+        │  REST, secret key, compare-and-swap on a revision number
+Supabase Postgres: one row holding the registry
+
+Local and Docker: the same function code, storing the registry in data/registry.json instead.
 ```
 
 Why this shape: one list for two owners and dozens of guests does not need a database server. A single JSON file is easy to back up, and the whole app is one process to deploy.
@@ -131,9 +135,9 @@ Every non-GET request must send `Content-Type: application/json`. This blocks cr
 
 ## 8. Open questions for the owners
 
-1. **Where to host?** The app is Docker-ready and needs a persistent volume for `/data`. Options: Render, Fly.io, Railway, or a small VPS. I have not deployed anything.
-2. **List title.** Default is "Baby Wishlist". Do you want the baby's name in it?
-3. **Passcode.** Set `OWNER_PASSCODE` when deploying. Use something only the two of you know.
+1. **Hosting.** Proposed: Vercel (the app and its API) with Supabase Postgres (the list). Both are connected to this environment. Waiting for your go-ahead to create the projects and deploy.
+2. **List title.** Resolved: "Baby Registry", no baby's name.
+3. **Passcode.** Resolved: I generate a strong one at deploy time, set it in Vercel as a sensitive variable, and tell you it once. You do not need to give me one.
 4. **Guest undo.** Plan says guests can undo only their own tick, from the same browser. Confirm this is what you want.
 
 ## 9. Sprint log

@@ -2,11 +2,13 @@
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { createApp } = require('../src/app');
-const { Store } = require('../src/store');
+const { Registry, FileBackend } = require('../src/store');
 
 const PASSCODE = 'correct horse battery';
 const DEVICE_A = 'device-a-0123456789abcdef';
@@ -16,6 +18,7 @@ const DEVICE_C = 'device-c-0123456789abcdef';
 let tmpDir;
 let dataFile;
 let store;
+let shareToken;
 let server;
 let base;
 let ownerCookie;
@@ -38,7 +41,7 @@ async function request(origin, method, pathname, { body, cookie, headers = {} } 
 }
 
 const call = (method, pathname, options) => request(base, method, pathname, options);
-const listPath = () => `/api/lists/${store.shareToken}`;
+const listPath = () => `/api/lists/${shareToken}`;
 const device = (id) => ({ 'X-Device-Id': id });
 
 async function addItem(fields, cookie = ownerCookie) {
@@ -58,18 +61,26 @@ function undo(itemId, { deviceId, cookie } = {}) {
   });
 }
 
+// A correctly signed owner cookie with a chosen expiry, to test the cookie check.
+function signedCookie(expiresAt, passcode = PASSCODE) {
+  const mac = crypto.createHmac('sha256', passcode).update(`owner-session:${expiresAt}`).digest('base64url');
+  return `owner_session=${expiresAt}.${mac}`;
+}
+
 async function startApp(options) {
-  const app = createApp(options);
+  const app = http.createServer(createApp(options));
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${app.address().port}`;
-  return { app, origin, close: () => new Promise((resolve) => app.close(resolve)) };
+  return { origin, close: () => new Promise((resolve) => app.close(resolve)) };
 }
 
 before(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wishlist-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
   dataFile = path.join(tmpDir, 'registry.json');
-  store = new Store(dataFile);
-  server = createApp({ store, passcode: PASSCODE, title: 'Test Wishlist' });
+  store = new Registry(new FileBackend(dataFile));
+  await store.init();
+  shareToken = (await store.read()).list.shareToken;
+  server = http.createServer(createApp({ store, passcode: PASSCODE, title: 'Test Registry' }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -88,19 +99,19 @@ test('the list is only reachable with its share token', async () => {
 
   const guest = await call('GET', listPath());
   assert.equal(guest.status, 200);
-  assert.equal(guest.data.title, 'Test Wishlist');
+  assert.equal(guest.data.title, 'Test Registry');
   assert.equal(guest.data.owner, false);
   assert.deepEqual(guest.data.items, []);
 });
 
 test('the list page is served with security headers and no-cache', async () => {
-  const res = await call('GET', `/l/${store.shareToken}`);
+  const res = await call('GET', `/l/${shareToken}`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/html/);
   assert.match(res.headers.get('content-security-policy'), /script-src 'self'/);
   assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(res.headers.get('x-frame-options'), 'DENY');
-  assert.match(res.text, /<title>Baby Wishlist<\/title>/);
+  assert.match(res.text, /<title>Baby Registry<\/title>/);
 });
 
 test('owner sign-in rejects a wrong passcode and issues a session cookie', async () => {
@@ -110,7 +121,7 @@ test('owner sign-in rejects a wrong passcode and issues a session cookie', async
   const right = await call('POST', '/api/owner/login', { body: { passcode: PASSCODE } });
   assert.equal(right.status, 200);
   const setCookie = right.headers.get('set-cookie');
-  assert.match(setCookie, /^owner_session=[A-Za-z0-9_-]+; Path=\/; HttpOnly; SameSite=Strict/);
+  assert.match(setCookie, /^owner_session=\d+\.[A-Za-z0-9_-]+; Path=\/; HttpOnly; SameSite=Strict/);
   ownerCookie = setCookie.split(';')[0];
 
   const me = await call('GET', listPath(), { cookie: ownerCookie });
@@ -124,6 +135,26 @@ test('guests cannot add, edit or delete items', async () => {
   assert.equal(edit.status, 401);
   const del = await call('DELETE', `${listPath()}/items/whatever`);
   assert.equal(del.status, 401);
+});
+
+test('forged, expired and wrongly signed cookies are rejected', async () => {
+  const past = Date.now() - 60_000;
+  const cases = {
+    'forged signature': `owner_session=${Date.now() + 60_000}.not-a-real-signature`,
+    expired: signedCookie(past),
+    'signed with another passcode': signedCookie(Date.now() + 60_000, 'another passcode entirely'),
+    'no expiry': 'owner_session=abc.def',
+  };
+  for (const [label, cookie] of Object.entries(cases)) {
+    const res = await call('POST', `${listPath()}/items`, { body: { name: 'x' }, cookie });
+    assert.equal(res.status, 401, `${label} should be rejected`);
+  }
+
+  const valid = await call('POST', `${listPath()}/items`, {
+    body: { name: 'Signed by hand' },
+    cookie: signedCookie(Date.now() + 60_000),
+  });
+  assert.equal(valid.status, 201, 'a correctly signed, unexpired cookie is accepted');
 });
 
 test('owner adds an item; name is required and trimmed', async () => {
@@ -242,6 +273,12 @@ test('user text is returned as plain data, never as markup', async () => {
   assert.equal(item.name, '<img src=x onerror=alert(1)>');
 });
 
+test('the health check reads the registry and reports ok', async () => {
+  const res = await call('GET', '/api/health');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.data, { ok: true });
+});
+
 // ---- Sprint 2: undo, quantities, rate limits ------------------------------
 
 test('a browser sees which items it ticked, so it can offer an undo', async () => {
@@ -352,14 +389,14 @@ test('owner undo on an item with nothing bought is a clear error', async () => {
 });
 
 test('data is written to disk and survives a restart', async () => {
-  const fresh = new Store(dataFile);
-  assert.equal(fresh.shareToken, store.shareToken);
-  assert.equal(fresh.state.items.length, store.state.items.length);
-  assert.ok(fresh.state.items.some((item) => item.name === 'Glass bottle'));
+  const fresh = new Registry(new FileBackend(dataFile));
+  const state = await fresh.read();
+  assert.equal(state.list.shareToken, shareToken);
+  assert.ok(state.items.some((item) => item.name === 'Glass bottle'));
   assert.ok(!fs.existsSync(`${dataFile}.tmp`));
 });
 
-test('schema 1 data (bought flags) migrates to quantity and claims', () => {
+test('schema 1 data (bought flags) migrates to quantity and claims', async () => {
   const legacyFile = path.join(tmpDir, 'legacy.json');
   const now = '2026-10-01T00:00:00.000Z';
   fs.writeFileSync(
@@ -375,10 +412,9 @@ test('schema 1 data (bought flags) migrates to quantity and claims', () => {
     }),
   );
 
-  const migrated = new Store(legacyFile);
-  const [cot, pram] = migrated.state.items;
+  const migrated = new Registry(new FileBackend(legacyFile));
+  const [cot, pram] = (await migrated.read()).items;
 
-  assert.equal(migrated.state.schemaVersion, 2);
   assert.equal(cot.quantity, 1);
   assert.equal(cot.claims.length, 1);
   assert.equal(cot.claims[0].by, null, 'legacy ticks have no browser to undo from');
@@ -386,6 +422,9 @@ test('schema 1 data (bought flags) migrates to quantity and claims', () => {
   assert.equal('boughtAt' in cot, false);
   assert.deepEqual(pram.claims, []);
 
+  // Reading does not write. The first real update saves the migrated data.
+  assert.equal(JSON.parse(fs.readFileSync(legacyFile, 'utf8')).schemaVersion, undefined);
+  await migrated.update(() => {});
   const onDisk = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
   assert.equal(onDisk.schemaVersion, 2);
   assert.equal(onDisk.items[0].claims.length, 1);
@@ -393,7 +432,7 @@ test('schema 1 data (bought flags) migrates to quantity and claims', () => {
 
 test('the sign-in endpoint is rate limited per IP', async () => {
   const limited = await startApp({
-    store: new Store(path.join(tmpDir, 'limit-login.json')),
+    store: new Registry(new FileBackend(path.join(tmpDir, 'limit-login.json'))),
     passcode: PASSCODE,
     limits: { loginAttempts: { max: 3, windowMs: 60_000 } },
   });
@@ -410,7 +449,8 @@ test('the sign-in endpoint is rate limited per IP', async () => {
 });
 
 test('ticks are rate limited per IP', async () => {
-  const limitedStore = new Store(path.join(tmpDir, 'limit-ticks.json'));
+  const limitedStore = new Registry(new FileBackend(path.join(tmpDir, 'limit-ticks.json')));
+  await limitedStore.init();
   const limited = await startApp({
     store: limitedStore,
     passcode: PASSCODE,
@@ -419,7 +459,7 @@ test('ticks are rate limited per IP', async () => {
   try {
     const login = await request(limited.origin, 'POST', '/api/owner/login', { body: { passcode: PASSCODE } });
     const cookie = login.headers.get('set-cookie').split(';')[0];
-    const token = limitedStore.shareToken;
+    const token = (await limitedStore.read()).list.shareToken;
 
     const add = await request(limited.origin, 'POST', `/api/lists/${token}/items`, {
       body: { name: 'Many', quantity: 10 },
@@ -442,7 +482,7 @@ test('ticks are rate limited per IP', async () => {
 
 test('behind a proxy, rate limits follow X-Forwarded-For', async () => {
   const proxied = await startApp({
-    store: new Store(path.join(tmpDir, 'proxied.json')),
+    store: new Registry(new FileBackend(path.join(tmpDir, 'proxied.json'))),
     passcode: PASSCODE,
     trustProxy: true,
     limits: { loginAttempts: { max: 2, windowMs: 60_000 } },
@@ -462,10 +502,19 @@ test('behind a proxy, rate limits follow X-Forwarded-For', async () => {
   }
 });
 
-test('logout ends the owner session', async () => {
+test('logout clears the cookie in this browser', async () => {
   const out = await call('POST', '/api/owner/logout', { cookie: ownerCookie });
   assert.equal(out.status, 200);
+  assert.match(out.headers.get('set-cookie'), /owner_session=; Path=\/; HttpOnly; SameSite=Strict; Max-Age=0/);
+});
 
-  const add = await call('POST', `${listPath()}/items`, { body: { name: 'After logout' }, cookie: ownerCookie });
-  assert.equal(add.status, 401);
+test('changing the passcode signs out every existing session', async () => {
+  const cookie = signedCookie(Date.now() + 60_000, PASSCODE);
+  const rotated = await startApp({ store, passcode: 'a brand new passcode', title: 'Test Registry' });
+  try {
+    const res = await request(rotated.origin, 'POST', `${listPath()}/items`, { body: { name: 'Nope' }, cookie });
+    assert.equal(res.status, 401);
+  } finally {
+    await rotated.close();
+  }
 });

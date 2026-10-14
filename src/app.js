@@ -2,9 +2,8 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const http = require('node:http');
 const path = require('node:path');
-const { publicItem } = require('./store');
+const { newItem, publicItem } = require('./store');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const SESSION_COOKIE = 'owner_session';
@@ -38,11 +37,14 @@ class HttpError extends Error {
   constructor(status, message, extra = {}) {
     super(message);
     this.status = status;
+    this.expose = true;
     Object.assign(this, extra);
   }
 }
 
 // Fixed-window counter per key (IP address). Old windows are pruned as we go.
+// Counters live in this process, so on serverless hosts each warm instance
+// keeps its own count. That is a soft limit, not a strict one.
 function createRateLimiter({ max, windowMs }) {
   const windows = new Map(); // key -> { count, resetAt }
   return (key) => {
@@ -65,15 +67,16 @@ function sha256Hex(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+// Returns a request listener: (req, res) => void. Works with http.createServer
+// locally and with a Vercel Node function.
 function createApp({
   store,
   passcode,
-  title = 'Baby Wishlist',
+  title = 'Baby Registry',
   cookieSecure = false,
   trustProxy = false,
   limits = {},
 }) {
-  const sessions = new Map(); // session id -> expiry timestamp
   const limitLogin = createRateLimiter({ ...DEFAULT_LIMITS.loginAttempts, ...limits.loginAttempts });
   const limitTicks = createRateLimiter({ ...DEFAULT_LIMITS.ticks, ...limits.ticks });
 
@@ -125,21 +128,34 @@ function createApp({
     }
   }
 
-  function requireList(token) {
-    if (!safeEqual(token, store.shareToken)) throw new HttpError(404, 'This list link is not valid');
+  function checkToken(state, token) {
+    if (!safeEqual(token, state.list.shareToken)) throw new HttpError(404, 'This list link is not valid');
   }
 
-  function sessionIdFrom(req) {
-    const match = (req.headers.cookie || '').match(/(?:^|;\s*)owner_session=([A-Za-z0-9_-]+)/);
+  function itemOrThrow(state, id) {
+    const item = state.items.find((candidate) => candidate.id === id);
+    if (!item) throw new HttpError(404, 'Item not found');
+    return item;
+  }
+
+  // Owner sessions are signed cookies, not server-side records, so they work
+  // on any instance. The signing key is the passcode itself: changing the
+  // passcode signs out every browser.
+  function signSession(expiresAt) {
+    return crypto.createHmac('sha256', passcode).update(`owner-session:${expiresAt}`).digest('base64url');
+  }
+
+  function cookieValue(req, name) {
+    const match = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([A-Za-z0-9_.-]+)`));
     return match ? match[1] : null;
   }
 
   function isOwner(req) {
-    const id = sessionIdFrom(req);
-    const expiresAt = id && sessions.get(id);
-    if (expiresAt && expiresAt > Date.now()) return true;
-    if (id) sessions.delete(id);
-    return false;
+    const value = cookieValue(req, SESSION_COOKIE);
+    if (!value) return false;
+    const [expires, mac] = value.split('.');
+    const expiresAt = Number(expires);
+    return Number.isFinite(expiresAt) && expiresAt > Date.now() && Boolean(mac) && safeEqual(mac, signSession(expiresAt));
   }
 
   function requireOwner(req) {
@@ -157,12 +173,6 @@ function createApp({
     const device = deviceHashFrom(req);
     if (!device) throw new HttpError(400, 'Missing device id');
     return device;
-  }
-
-  function findItem(id) {
-    const item = store.findItem(id);
-    if (!item) throw new HttpError(404, 'Item not found');
-    return item;
   }
 
   function sessionCookie(value, maxAgeSeconds) {
@@ -220,6 +230,8 @@ function createApp({
   }
 
   async function readJson(req) {
+    // Some hosts parse the body before we see it. Use that if it is there.
+    if (req.body && typeof req.body === 'object') return req.body;
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {
@@ -239,17 +251,26 @@ function createApp({
     }
   }
 
+  function snapshot(state, device) {
+    return {
+      version: state.version,
+      updatedAt: state.updatedAt,
+      items: state.items.map((item) => publicItem(item, device)),
+    };
+  }
+
   // ---- handlers: each returns { status?, body, headers? } -------------------
 
-  function getList({ req, params, url }) {
-    requireList(params[0]);
+  async function getList({ req, params, url }) {
+    const state = await store.read();
+    checkToken(state, params[0]);
     const owner = isOwner(req);
     const device = deviceHashFrom(req);
     const version = url.searchParams.get('version');
-    if (version !== null && Number(version) === store.state.version) {
-      return { body: { version: store.state.version, unchanged: true, owner } };
+    if (version !== null && Number(version) === state.version) {
+      return { body: { version: state.version, unchanged: true, owner } };
     }
-    return { body: { title, ...store.snapshot(device), owner } };
+    return { body: { title, ...snapshot(state, device), owner } };
   }
 
   function login({ req, body }) {
@@ -257,86 +278,107 @@ function createApp({
     const supplied = typeof body.passcode === 'string' ? body.passcode : '';
     if (!safeEqual(supplied, passcode)) throw new HttpError(401, 'Wrong passcode');
 
-    const now = Date.now();
-    for (const [id, expiresAt] of sessions) if (expiresAt <= now) sessions.delete(id);
-
-    const id = crypto.randomBytes(32).toString('base64url');
-    sessions.set(id, now + SESSION_TTL_MS);
+    const expiresAt = Date.now() + SESSION_TTL_MS;
     return {
       body: { ok: true },
-      headers: { 'Set-Cookie': sessionCookie(id, SESSION_TTL_MS / 1000) },
+      headers: { 'Set-Cookie': sessionCookie(`${expiresAt}.${signSession(expiresAt)}`, SESSION_TTL_MS / 1000) },
     };
   }
 
-  function logout({ req }) {
-    const id = sessionIdFrom(req);
-    if (id) sessions.delete(id);
+  // Clears this browser's cookie. Other browsers keep their sessions until
+  // they expire or the passcode changes.
+  function logout() {
     return { body: { ok: true }, headers: { 'Set-Cookie': sessionCookie('', 0) } };
   }
 
-  function addItem({ req, params, body }) {
-    requireList(params[0]);
+  async function addItem({ req, params, body }) {
     requireOwner(req);
-    const item = store.addItem(cleanItemInput(body));
+    const fields = cleanItemInput(body);
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const created = newItem(fields);
+      state.items.push(created);
+      return created;
+    });
     return { status: 201, body: { item: publicItem(item, deviceHashFrom(req)) } };
   }
 
-  function editItem({ req, params, body }) {
-    requireList(params[0]);
+  async function editItem({ req, params, body }) {
     requireOwner(req);
-    const item = findItem(params[1]);
-    const fields = cleanItemInput(body, { partial: true });
-    if (Object.keys(fields).length === 0) throw new HttpError(400, 'Nothing to change');
-    if (fields.quantity !== undefined && fields.quantity < item.claims.length) {
-      throw new HttpError(400, `Quantity cannot be lower than the ${item.claims.length} already bought`);
-    }
-    store.updateItem(item, fields);
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      const fields = cleanItemInput(body, { partial: true });
+      if (Object.keys(fields).length === 0) throw new HttpError(400, 'Nothing to change');
+      if (fields.quantity !== undefined && fields.quantity < target.claims.length) {
+        throw new HttpError(400, `Quantity cannot be lower than the ${target.claims.length} already bought`);
+      }
+      Object.assign(target, fields, { updatedAt: new Date().toISOString() });
+      return target;
+    });
     return { body: { item: publicItem(item, deviceHashFrom(req)) } };
   }
 
-  function deleteItem({ req, params }) {
-    requireList(params[0]);
+  async function deleteItem({ req, params }) {
     requireOwner(req);
-    store.deleteItem(findItem(params[1]));
+    await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      state.items = state.items.filter((item) => item.id !== target.id);
+    });
     return { body: { ok: true } };
   }
 
   // Anyone with the link can claim one of an item (guests and owners alike).
-  function markBought({ req, params }) {
-    requireList(params[0]);
+  async function markBought({ req, params }) {
     enforce(limitTicks, req);
     const device = requireDevice(req);
-    const item = findItem(params[1]);
-    if (item.claims.length >= item.quantity) {
-      const message =
-        item.quantity === 1 ? 'Someone already marked this one as bought' : 'All of these have already been bought';
-      throw new HttpError(409, message, { item: publicItem(item, device) });
-    }
-    const claim = { id: crypto.randomUUID(), by: device, at: new Date().toISOString() };
-    store.updateItem(item, { claims: [...item.claims, claim] });
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      if (target.claims.length >= target.quantity) {
+        const message =
+          target.quantity === 1 ? 'Someone already marked this one as bought' : 'All of these have already been bought';
+        throw new HttpError(409, message, { item: publicItem(target, device) });
+      }
+      const now = new Date().toISOString();
+      target.claims.push({ id: crypto.randomUUID(), by: device, at: now });
+      target.updatedAt = now;
+      return target;
+    });
     return { body: { item: publicItem(item, device) } };
   }
 
   // Owners can undo the latest claim on an item. Guests can undo only the
   // latest claim made from their own browser.
-  function unmarkBought({ req, params }) {
-    requireList(params[0]);
+  async function unmarkBought({ req, params }) {
     enforce(limitTicks, req);
     const owner = isOwner(req);
     const device = deviceHashFrom(req);
-    const item = findItem(params[1]);
-
-    const undoable = owner ? item.claims : item.claims.filter((claim) => device && claim.by === device);
-    if (undoable.length === 0) {
-      if (owner) throw new HttpError(409, 'Nothing to undo on this item');
-      throw new HttpError(403, 'Only the browser that ticked this can undo it');
-    }
-    const latest = undoable[undoable.length - 1];
-    store.updateItem(item, { claims: item.claims.filter((claim) => claim.id !== latest.id) });
+    const item = await store.update((state) => {
+      checkToken(state, params[0]);
+      const target = itemOrThrow(state, params[1]);
+      const undoable = owner ? target.claims : target.claims.filter((claim) => device && claim.by === device);
+      if (undoable.length === 0) {
+        if (owner) throw new HttpError(409, 'Nothing to undo on this item');
+        throw new HttpError(403, 'Only the browser that ticked this can undo it');
+      }
+      const latest = undoable[undoable.length - 1];
+      target.claims = target.claims.filter((claim) => claim.id !== latest.id);
+      target.updatedAt = new Date().toISOString();
+      return target;
+    });
     return { body: { item: publicItem(item, device) } };
   }
 
+  // Reads the registry, so a daily ping keeps a free-tier database from pausing.
+  async function health() {
+    await store.read();
+    return { body: { ok: true } };
+  }
+
   const ROUTES = [
+    ['GET', /^\/api\/health$/, health],
     ['GET', /^\/api\/lists\/([^/]+)$/, getList],
     ['POST', /^\/api\/owner\/login$/, login],
     ['POST', /^\/api\/owner\/logout$/, logout],
@@ -368,16 +410,16 @@ function createApp({
         }
       }
       const body = req.method === 'GET' ? {} : await readJson(req);
-      const result = handler({ req, params: match.slice(1), url, body });
+      const result = await handler({ req, params: match.slice(1), url, body });
       return sendJson(res, result.status || 200, result.body, result.headers);
     }
 
     throw new HttpError(404, 'Not found');
   }
 
-  return http.createServer((req, res) => {
+  return (req, res) => {
     handle(req, res).catch((err) => {
-      if (err instanceof HttpError) {
+      if (err.expose) {
         const { item, retryAfter } = err;
         const headers = retryAfter ? { 'Retry-After': String(retryAfter) } : {};
         return sendJson(res, err.status, { error: err.message, ...(item && { item }) }, headers);
@@ -385,7 +427,7 @@ function createApp({
       console.error(err);
       sendJson(res, 500, { error: 'Something went wrong' });
     });
-  });
+  };
 }
 
 module.exports = { createApp };
