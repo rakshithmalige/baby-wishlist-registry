@@ -56,6 +56,8 @@ The app is a static page in `public/` plus one serverless function in `api/`. `v
 
 Vercel sets `VERCEL=1`, which turns on secure cookies and proxy-aware rate limits automatically.
 
+The page sends every API call to `/api/route?p=<path>`. On this Vercel project only single-segment `/api` paths reach the function (`/api/lists/<token>` returned Vercel's 404), so keep that shape if you change the routing.
+
 ## Deploy with Docker
 
 ```sh
