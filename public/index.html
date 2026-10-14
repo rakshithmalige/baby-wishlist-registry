@@ -9,8 +9,14 @@
 </head>
 <body>
   <header class="hero">
+    <p class="hero-emoji" aria-hidden="true">🍼</p>
     <h1 id="title">Baby Registry</h1>
-    <p id="progress" class="muted"></p>
+    <div class="progress-wrap">
+      <p id="progress" class="progress-text"></p>
+      <div id="progress-bar" class="progress" role="presentation" hidden>
+        <span id="progress-fill" class="progress-fill"></span>
+      </div>
+    </div>
     <p id="status" class="muted small" aria-live="polite"></p>
   </header>
 
@@ -29,7 +35,7 @@
     </form>
 
     <form id="add-form" class="card" hidden>
-      <h2>Add an item</h2>
+      <h2>Add something lovely ✨</h2>
       <label>Name
         <input name="name" required maxlength="120" autocomplete="off">
       </label>

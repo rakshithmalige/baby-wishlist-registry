@@ -10,6 +10,8 @@
   const els = {
     title: $('title'),
     progress: $('progress'),
+    progressBar: $('progress-bar'),
+    progressFill: $('progress-fill'),
     status: $('status'),
     noList: $('no-list'),
     loginForm: $('login-form'),
@@ -117,13 +119,15 @@
     els.title.textContent = list.title;
     document.title = list.title;
     els.progress.textContent = items.length ? `${boughtCount} of ${items.length} gifts bought` : '';
+    els.progressBar.hidden = items.length === 0;
+    els.progressFill.style.width = `${items.length ? Math.round((boughtCount / items.length) * 100) : 0}%`;
 
     // Still-needed items first, bought ones sink to the bottom.
     const ordered = [...items.filter((item) => !item.bought), ...items.filter((item) => item.bought)];
     els.items.replaceChildren(...ordered.map((item) => renderItem(item, owner)));
     els.items.hidden = items.length === 0;
 
-    els.empty.textContent = owner ? 'No gifts yet. Add the first one below.' : 'No gifts on the list yet.';
+    els.empty.textContent = owner ? 'No treasures yet. Add the first one below ✨' : 'No treasures on the list yet 🧸';
     els.empty.hidden = items.length !== 0;
 
     els.addForm.hidden = !owner;
@@ -234,6 +238,7 @@
     els.noList.querySelector('#no-list-detail').hidden = !detail;
     els.noList.hidden = false;
     els.progress.hidden = true;
+    els.progressBar.hidden = true;
     els.status.hidden = true;
     els.ownerToggle.hidden = true;
   }
